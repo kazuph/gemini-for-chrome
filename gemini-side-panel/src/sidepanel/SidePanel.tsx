@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
-import { Settings, AlertCircle, Plus, Minus, Sun, Moon, Monitor, PlusCircle, MousePointer2 } from 'lucide-react'
+import { Settings, AlertCircle, Plus, Minus, Sun, Moon, Monitor, PlusCircle } from 'lucide-react'
 import type { FunctionCall } from '@google/generative-ai'
 import type { Message, PageContent, MessageResponse, UISettings, ThemeMode, BrowserActionResult } from '../types'
 import { DEFAULT_UI_SETTINGS } from '../types'
@@ -565,20 +565,6 @@ export default function SidePanel() {
             <Plus className="w-4 h-4" />
           </button>
 
-          {/* Browser action mode toggle */}
-          <button
-            onClick={() => setBrowserActionMode(!browserActionMode)}
-            className={cn(
-              'p-2 rounded-lg transition-colors',
-              browserActionMode
-                ? 'bg-blue-600 text-white hover:bg-blue-500'
-                : theme.textSecondary + ' ' + theme.hover
-            )}
-            title={browserActionMode ? 'Browser actions: ON (can click/fill)' : 'Browser actions: OFF (chat only)'}
-          >
-            <MousePointer2 className="w-4 h-4" />
-          </button>
-
           {/* Theme toggle */}
           <button
             onClick={cycleThemeMode}
@@ -695,6 +681,8 @@ export default function SidePanel() {
         onSend={handleSendMessage}
         isLoading={isLoading}
         theme={effectiveTheme}
+        browserActionMode={browserActionMode}
+        onToggleBrowserAction={() => setBrowserActionMode(!browserActionMode)}
       />
     </div>
   )
