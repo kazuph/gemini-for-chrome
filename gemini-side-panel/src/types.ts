@@ -14,10 +14,51 @@ export interface PageContent {
   excerpt?: string
 }
 
+// Browser action types for Function Calling
+export interface ClickElementAction {
+  action: 'CLICK_ELEMENT'
+  selector: string
+}
+
+export interface FillElementAction {
+  action: 'FILL_ELEMENT'
+  selector: string
+  value: string
+}
+
+export interface GetHtmlAction {
+  action: 'GET_HTML'
+  selector?: string
+}
+
+export type BrowserAction = ClickElementAction | FillElementAction | GetHtmlAction
+
+// Browser action results
+export interface ClickElementResult {
+  success: boolean
+  message: string
+}
+
+export interface FillElementResult {
+  success: boolean
+  message: string
+}
+
+export interface GetHtmlResult {
+  success: boolean
+  html?: string
+  error?: string
+}
+
+export type BrowserActionResult = ClickElementResult | FillElementResult | GetHtmlResult
+
 // Message actions for Chrome messaging
 export type MessageAction =
   | { action: 'GET_PAGE_CONTENT' }
   | { action: 'PING' }
+  | ClickElementAction
+  | FillElementAction
+  | GetHtmlAction
 
 export type MessageResponse<T = unknown> =
   | { success: true; data: T }

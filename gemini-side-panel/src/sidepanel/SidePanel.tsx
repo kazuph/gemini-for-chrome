@@ -1,8 +1,9 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
-import { Settings, Trash2, AlertCircle, RefreshCw, Plus, Minus, Sun, Moon, Monitor } from 'lucide-react'
-import type { Message, PageContent, MessageResponse, UISettings, ThemeMode } from '../types'
+import { Settings, AlertCircle, Plus, Minus, Sun, Moon, Monitor, PlusCircle } from 'lucide-react'
+import type { FunctionCall } from '@google/generative-ai'
+import type { Message, PageContent, MessageResponse, UISettings, ThemeMode, BrowserActionResult } from '../types'
 import { DEFAULT_UI_SETTINGS } from '../types'
-import { GeminiChat, loadGeminiConfig } from '../lib/gemini'
+import { GeminiChat, loadGeminiConfig, type FunctionCallResult } from '../lib/gemini'
 import { generateId, cn, loadUISettings, saveUISettings, getEffectiveTheme } from '../lib/utils'
 import { MessageBubble, ChatInput, LoadingIndicator } from '../components'
 
@@ -25,7 +26,6 @@ export default function SidePanel() {
 
   // Page content state
   const [pageContent, setPageContent] = useState<PageContent | null>(null)
-  const [isLoadingPage, setIsLoadingPage] = useState<boolean>(false)
 
   // UI Settings state
   const [uiSettings, setUISettings] = useState<UISettings>(DEFAULT_UI_SETTINGS)
@@ -57,7 +57,6 @@ export default function SidePanel() {
    * Fetch page content from the active tab
    */
   const fetchPageContent = useCallback(async () => {
-    setIsLoadingPage(true)
     setError(null)
 
     try {
@@ -84,8 +83,6 @@ export default function SidePanel() {
     } catch (err) {
       console.error('Error fetching page content:', err)
       setPageContent(null)
-    } finally {
-      setIsLoadingPage(false)
     }
   }, [])
 
@@ -183,8 +180,53 @@ export default function SidePanel() {
   }
 
   /**
+   * Execute browser actions from function calls
+   */
+  const executeBrowserAction = useCallback(
+    async (functionCall: FunctionCall): Promise<FunctionCallResult> => {
+      const browserAction = GeminiChat.functionCallToBrowserAction(functionCall)
+
+      if (!browserAction) {
+        return {
+          name: functionCall.name,
+          response: { success: false, error: `Unknown function: ${functionCall.name}` },
+        }
+      }
+
+      try {
+        const response = await new Promise<MessageResponse<BrowserActionResult>>((resolve) => {
+          chrome.runtime.sendMessage(browserAction, (res) => {
+            if (chrome.runtime.lastError) {
+              resolve({
+                success: false,
+                error: chrome.runtime.lastError.message || 'Failed to execute action',
+              })
+            } else {
+              resolve(res)
+            }
+          })
+        })
+
+        console.log(`Browser action ${functionCall.name} result:`, response)
+        return {
+          name: functionCall.name,
+          response: response.success ? response.data : { success: false, error: response.error },
+        }
+      } catch (err) {
+        console.error(`Error executing ${functionCall.name}:`, err)
+        return {
+          name: functionCall.name,
+          response: { success: false, error: err instanceof Error ? err.message : 'Unknown error' },
+        }
+      }
+    },
+    []
+  )
+
+  /**
    * Send a message to Gemini
    * Always fetches fresh page content when includePageContent is true
+   * Supports Function Calling for browser actions
    */
   const handleSendMessage = useCallback(
     async (content: string, includePageContent: boolean) => {
@@ -237,11 +279,68 @@ export default function SidePanel() {
         }
       }
 
-      // Prepare assistant message for streaming
-      const assistantMessageId = generateId()
+      // Handler for function calls
+      const handleFunctionCalls = async (
+        functionCalls: FunctionCall[],
+        currentMessages: Message[],
+        pageCtx: PageContent | undefined
+      ) => {
+        // Show what actions are being executed
+        const actionNames = functionCalls.map((fc) => fc.name).join(', ')
+        setStreamingContent((prev) => prev + `\n\n*Executing: ${actionNames}...*\n`)
+
+        // Execute all function calls
+        const results: FunctionCallResult[] = await Promise.all(
+          functionCalls.map((fc) => executeBrowserAction(fc))
+        )
+
+        // Show results
+        const resultSummary = results
+          .map((r) => {
+            const res = r.response as { success: boolean; message?: string; error?: string }
+            return `- ${r.name}: ${res.success ? res.message || 'Success' : res.error || 'Failed'}`
+          })
+          .join('\n')
+        setStreamingContent((prev) => prev + `\n${resultSummary}\n\n`)
+
+        // Send results back to Gemini for continuation
+        await geminiChatRef.current!.sendFunctionResults(
+          currentMessages,
+          pageCtx,
+          functionCalls,
+          results,
+          // onChunk
+          (chunk) => {
+            setStreamingContent((prev) => prev + chunk)
+          },
+          // onComplete
+          (fullText) => {
+            const assistantMessage: Message = {
+              id: generateId(),
+              role: 'assistant',
+              content: fullText,
+              timestamp: Date.now(),
+            }
+            setMessages((prev) => [...prev, assistantMessage])
+            setStreamingContent('')
+            setIsLoading(false)
+          },
+          // onFunctionCall - recursive handling for chained function calls
+          async (newFunctionCalls) => {
+            await handleFunctionCalls(newFunctionCalls, currentMessages, pageCtx)
+          },
+          // onError
+          (error) => {
+            setError(error.message || 'An error occurred while processing function results')
+            setStreamingContent('')
+            setIsLoading(false)
+          }
+        )
+      }
 
       try {
-        await geminiChatRef.current.sendMessageStream(
+        // Use sendMessageWithTools to support function calling
+        await geminiChatRef.current.sendMessageWithTools(
           content,
           messages,
           currentPageContent,
@@ -252,7 +351,7 @@ export default function SidePanel() {
           // onComplete
           (fullText) => {
             const assistantMessage: Message = {
-              id: assistantMessageId,
+              id: generateId(),
               role: 'assistant',
               content: fullText,
               timestamp: Date.now(),
@@ -260,6 +359,10 @@ export default function SidePanel() {
             setMessages((prev) => [...prev, assistantMessage])
             setStreamingContent('')
             setIsLoading(false)
+          },
+          // onFunctionCall
+          async (functionCalls) => {
+            await handleFunctionCalls(functionCalls, messages, currentPageContent)
           },
           // onError
           (error) => {
@@ -275,7 +378,7 @@ export default function SidePanel() {
         setIsLoading(false)
       }
     },
-    [messages]
+    [messages, executeBrowserAction]
   )
 
   /**
@@ -443,34 +546,17 @@ export default function SidePanel() {
             )}
           </button>
 
-          {/* Refresh page content */}
-          <button
-            onClick={fetchPageContent}
-            disabled={isLoadingPage}
-            className={cn(
-              'p-2 rounded-lg transition-colors',
-              theme.textSecondary,
-              theme.hover,
-              isLoadingPage && 'animate-spin'
-            )}
-            title="Refresh page content"
-          >
-            <RefreshCw className="w-4 h-4" />
-          </button>
-
-          {/* Clear chat */}
+          {/* New chat */}
           <button
             onClick={handleClearChat}
-            disabled={messages.length === 0}
             className={cn(
               'p-2 rounded-lg transition-colors',
               theme.textSecondary,
-              theme.hover,
-              'disabled:opacity-30 disabled:cursor-not-allowed'
+              theme.hover
             )}
-            title="Clear chat"
+            title="New chat"
           >
-            <Trash2 className="w-4 h-4" />
+            <PlusCircle className="w-4 h-4" />
           </button>
 
           {/* Settings */}

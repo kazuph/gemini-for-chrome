@@ -1,4 +1,12 @@
-import type { MessageAction, MessageResponse, PageContent } from '../types'
+import type {
+  MessageAction,
+  MessageResponse,
+  PageContent,
+  BrowserActionResult,
+  ClickElementAction,
+  FillElementAction,
+  GetHtmlAction,
+} from '../types'
 
 console.log('Gemini Side Panel: Background service worker started')
 
@@ -16,13 +24,26 @@ chrome.runtime.onMessage.addListener(
   (
     request: MessageAction & { target?: string },
     sender: chrome.runtime.MessageSender,
-    sendResponse: (response: MessageResponse<PageContent>) => void
+    sendResponse: (response: MessageResponse<PageContent | BrowserActionResult>) => void
   ) => {
     console.log('Gemini Side Panel Background: Received message', request, 'from', sender)
 
     // Handle GET_PAGE_CONTENT - relay to active tab's content script
     if (request.action === 'GET_PAGE_CONTENT') {
-      handleGetPageContent(sendResponse)
+      handleGetPageContent(sendResponse as (response: MessageResponse<PageContent>) => void)
+      return true // Keep message channel open for async response
+    }
+
+    // Handle browser actions - relay to active tab's content script
+    if (
+      request.action === 'CLICK_ELEMENT' ||
+      request.action === 'FILL_ELEMENT' ||
+      request.action === 'GET_HTML'
+    ) {
+      handleBrowserAction(
+        request as ClickElementAction | FillElementAction | GetHtmlAction,
+        sendResponse as (response: MessageResponse<BrowserActionResult>) => void
+      )
       return true // Keep message channel open for async response
     }
 
@@ -137,6 +158,95 @@ async function handleGetPageContent(
     }
   } catch (error) {
     console.error('Gemini Side Panel Background: Error in handleGetPageContent', error)
+    sendResponse({
+      success: false,
+      error: error instanceof Error ? error.message : 'Unknown error occurred',
+    })
+  }
+}
+
+/**
+ * Handle browser actions (click, fill, get_html) by relaying to content script
+ */
+async function handleBrowserAction(
+  action: ClickElementAction | FillElementAction | GetHtmlAction,
+  sendResponse: (response: MessageResponse<BrowserActionResult>) => void
+): Promise<void> {
+  try {
+    // Get the active tab
+    const [activeTab] = await chrome.tabs.query({
+      active: true,
+      currentWindow: true,
+    })
+
+    if (!activeTab?.id) {
+      sendResponse({
+        success: false,
+        error: 'No active tab found',
+      })
+      return
+    }
+
+    // Check if we can inject into this tab
+    if (
+      activeTab.url?.startsWith('chrome://') ||
+      activeTab.url?.startsWith('chrome-extension://') ||
+      activeTab.url?.startsWith('edge://') ||
+      activeTab.url?.startsWith('about:')
+    ) {
+      sendResponse({
+        success: false,
+        error: 'Cannot perform actions on browser internal pages',
+      })
+      return
+    }
+
+    // Try to send message to content script
+    try {
+      const response = await chrome.tabs.sendMessage<
+        ClickElementAction | FillElementAction | GetHtmlAction,
+        MessageResponse<BrowserActionResult>
+      >(activeTab.id, action)
+
+      console.log('Gemini Side Panel Background: Browser action response', response)
+      sendResponse(response)
+    } catch (error) {
+      console.error('Gemini Side Panel Background: Error sending browser action, attempting injection', error)
+
+      // Content script not loaded - try to inject it dynamically
+      try {
+        const manifest = chrome.runtime.getManifest()
+        const contentScriptPath = manifest.content_scripts?.[0]?.js?.[0]
+
+        if (!contentScriptPath) {
+          throw new Error('Content script path not found in manifest')
+        }
+
+        await chrome.scripting.executeScript({
+          target: { tabId: activeTab.id },
+          files: [contentScriptPath],
+        })
+
+        // Wait for script to initialize
+        await new Promise((resolve) => setTimeout(resolve, 300))
+
+        // Retry sending the action
+        const retryResponse = await chrome.tabs.sendMessage<
+          ClickElementAction | FillElementAction | GetHtmlAction,
+          MessageResponse<BrowserActionResult>
+        >(activeTab.id, action)
+
+        sendResponse(retryResponse)
+      } catch (injectError) {
+        console.error('Gemini Side Panel Background: Failed to inject for browser action', injectError)
+        sendResponse({
+          success: false,
+          error: `Failed to execute action: ${injectError instanceof Error ? injectError.message : String(injectError)}`,
+        })
+      }
+    }
+  } catch (error) {
+    console.error('Gemini Side Panel Background: Error in handleBrowserAction', error)
     sendResponse({
       success: false,
       error: error instanceof Error ? error.message : 'Unknown error occurred',
