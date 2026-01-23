@@ -1,16 +1,14 @@
 import { useState, useRef, useEffect } from 'react'
-import { Send, FileText, Loader2, MousePointer2 } from 'lucide-react'
+import { Send, FileText, Loader2 } from 'lucide-react'
 import { cn } from '../lib/utils'
 
 interface ChatInputProps {
   onSend: (message: string, includePageContent: boolean) => void
   isLoading: boolean
   theme?: 'light' | 'dark'
-  browserActionMode: boolean
-  onToggleBrowserAction: () => void
 }
 
-export default function ChatInput({ onSend, isLoading, theme = 'dark', browserActionMode, onToggleBrowserAction }: ChatInputProps) {
+export default function ChatInput({ onSend, isLoading, theme = 'dark' }: ChatInputProps) {
   const [message, setMessage] = useState('')
   const [includePageContent, setIncludePageContent] = useState(true)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
@@ -55,7 +53,7 @@ export default function ChatInput({ onSend, isLoading, theme = 'dark', browserAc
 
   return (
     <form onSubmit={handleSubmit} className={cn('border-t p-4', colors.bg, colors.border)}>
-      {/* Page content toggle and browser action mode */}
+      {/* Page content toggle - always enabled, fetches on send */}
       <div className="flex items-center gap-2 mb-3">
         <button
           type="button"
@@ -70,22 +68,11 @@ export default function ChatInput({ onSend, isLoading, theme = 'dark', browserAc
           <FileText className="w-3.5 h-3.5" />
           {includePageContent ? 'Include page' : 'Page excluded'}
         </button>
-
-        {/* Browser action mode toggle */}
-        <button
-          type="button"
-          onClick={onToggleBrowserAction}
-          className={cn(
-            'flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium transition-colors',
-            browserActionMode
-              ? 'bg-orange-500 text-white hover:bg-orange-400'
-              : colors.toggleInactive
-          )}
-          title={browserActionMode ? 'Browser actions: ON' : 'Browser actions: OFF'}
-        >
-          <MousePointer2 className="w-3.5 h-3.5" />
-          {browserActionMode ? 'Actions ON' : 'Actions OFF'}
-        </button>
+        {includePageContent && (
+          <span className={cn('text-xs', colors.textSecondary)}>
+            Fetches on send
+          </span>
+        )}
       </div>
 
       {/* Input area */}
