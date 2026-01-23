@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
-import { Settings, AlertCircle, Plus, Minus, Sun, Moon, Monitor, PlusCircle } from 'lucide-react'
+import { Settings, AlertCircle, Plus, Minus, Sun, Moon, Monitor, PlusCircle, MousePointer2 } from 'lucide-react'
 import type { FunctionCall } from '@google/generative-ai'
 import type { Message, PageContent, MessageResponse, UISettings, ThemeMode, BrowserActionResult } from '../types'
 import { DEFAULT_UI_SETTINGS } from '../types'
@@ -30,6 +30,9 @@ export default function SidePanel() {
   // UI Settings state
   const [uiSettings, setUISettings] = useState<UISettings>(DEFAULT_UI_SETTINGS)
   const [effectiveTheme, setEffectiveTheme] = useState<'light' | 'dark'>('dark')
+
+  // Browser action mode (off by default for safety)
+  const [browserActionMode, setBrowserActionMode] = useState<boolean>(false)
 
   // Refs
   const messagesEndRef = useRef<HTMLDivElement>(null)
@@ -339,38 +342,69 @@ export default function SidePanel() {
       }
 
       try {
-        // Use sendMessageWithTools to support function calling
-        await geminiChatRef.current.sendMessageWithTools(
-          content,
-          messages,
-          currentPageContent,
-          // onChunk
-          (chunk) => {
-            setStreamingContent((prev) => prev + chunk)
-          },
-          // onComplete
-          (fullText) => {
-            const assistantMessage: Message = {
-              id: generateId(),
-              role: 'assistant',
-              content: fullText,
-              timestamp: Date.now(),
+        if (browserActionMode) {
+          // Use sendMessageWithTools to support function calling (browser actions)
+          await geminiChatRef.current.sendMessageWithTools(
+            content,
+            messages,
+            currentPageContent,
+            // onChunk
+            (chunk) => {
+              setStreamingContent((prev) => prev + chunk)
+            },
+            // onComplete
+            (fullText) => {
+              const assistantMessage: Message = {
+                id: generateId(),
+                role: 'assistant',
+                content: fullText,
+                timestamp: Date.now(),
+              }
+              setMessages((prev) => [...prev, assistantMessage])
+              setStreamingContent('')
+              setIsLoading(false)
+            },
+            // onFunctionCall
+            async (functionCalls) => {
+              await handleFunctionCalls(functionCalls, messages, currentPageContent)
+            },
+            // onError
+            (error) => {
+              setError(error.message || 'An error occurred while generating a response')
+              setStreamingContent('')
+              setIsLoading(false)
             }
-            setMessages((prev) => [...prev, assistantMessage])
-            setStreamingContent('')
-            setIsLoading(false)
-          },
-          // onFunctionCall
-          async (functionCalls) => {
-            await handleFunctionCalls(functionCalls, messages, currentPageContent)
-          },
-          // onError
-          (error) => {
-            setError(error.message || 'An error occurred while generating a response')
-            setStreamingContent('')
-            setIsLoading(false)
-          }
-        )
+          )
+        } else {
+          // Use regular sendMessageStream (no browser actions)
+          await geminiChatRef.current.sendMessageStream(
+            content,
+            messages,
+            currentPageContent,
+            // onChunk
+            (chunk) => {
+              setStreamingContent((prev) => prev + chunk)
+            },
+            // onComplete
+            (fullText) => {
+              const assistantMessage: Message = {
+                id: generateId(),
+                role: 'assistant',
+                content: fullText,
+                timestamp: Date.now(),
+              }
+              setMessages((prev) => [...prev, assistantMessage])
+              setStreamingContent('')
+              setIsLoading(false)
+            },
+            // onError
+            (error) => {
+              setError(error.message || 'An error occurred while generating a response')
+              setStreamingContent('')
+              setIsLoading(false)
+            }
+          )
+        }
       } catch (err) {
         console.error('Chat error:', err)
         setError(err instanceof Error ? err.message : 'An unexpected error occurred')
@@ -378,7 +412,7 @@ export default function SidePanel() {
         setIsLoading(false)
       }
     },
-    [messages, executeBrowserAction]
+    [messages, executeBrowserAction, browserActionMode]
   )
 
   /**
@@ -529,6 +563,20 @@ export default function SidePanel() {
             title="Increase font size"
           >
             <Plus className="w-4 h-4" />
+          </button>
+
+          {/* Browser action mode toggle */}
+          <button
+            onClick={() => setBrowserActionMode(!browserActionMode)}
+            className={cn(
+              'p-2 rounded-lg transition-colors',
+              browserActionMode
+                ? 'bg-blue-600 text-white hover:bg-blue-500'
+                : theme.textSecondary + ' ' + theme.hover
+            )}
+            title={browserActionMode ? 'Browser actions: ON (can click/fill)' : 'Browser actions: OFF (chat only)'}
+          >
+            <MousePointer2 className="w-4 h-4" />
           </button>
 
           {/* Theme toggle */}
