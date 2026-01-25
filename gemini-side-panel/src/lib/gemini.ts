@@ -1,6 +1,7 @@
 import {
   GoogleGenerativeAI,
   SchemaType,
+  FunctionCallingMode,
   type GenerativeModel,
   type FunctionDeclaration,
   type FunctionCall,
@@ -11,7 +12,7 @@ import type { Message, PageContent, GeminiConfig, BrowserAction } from '../types
 const browserTools: FunctionDeclaration[] = [
   {
     name: 'click_element',
-    description: 'Click an element on the page using a CSS selector. Use this to interact with buttons, links, or other clickable elements.',
+    description: 'IMPORTANT: Use this function to click an element on the page. When user says "click X", call this function immediately with an appropriate CSS selector.',
     parameters: {
       type: SchemaType.OBJECT,
       properties: {
@@ -25,7 +26,7 @@ const browserTools: FunctionDeclaration[] = [
   },
   {
     name: 'fill_element',
-    description: 'Fill an input or textarea element with text using a CSS selector. Use this to enter text into form fields.',
+    description: 'IMPORTANT: Use this function to fill an input field. When user says "enter X in Y" or "fill Y with X", call this function immediately.',
     parameters: {
       type: SchemaType.OBJECT,
       properties: {
@@ -43,7 +44,7 @@ const browserTools: FunctionDeclaration[] = [
   },
   {
     name: 'get_html',
-    description: 'Get the HTML content of an element or the entire page. Use this to inspect page structure or get specific element content.',
+    description: 'IMPORTANT: Use this function to get HTML content. When user asks about page structure or wants to see an element, call this function immediately.',
     parameters: {
       type: SchemaType.OBJECT,
       properties: {
@@ -96,19 +97,75 @@ export class GeminiChat {
     let systemPrompt = `You are a helpful AI assistant powered by Gemini.
 You help users understand and work with web content.
 Be concise but thorough in your responses.
-Format your responses in Markdown when appropriate.`
+Format your responses in Markdown when appropriate.
+ALWAYS respond in the same language as the user's message.
+
+## Mermaid Diagram Guidelines (CRITICAL)
+
+When creating Mermaid diagrams, you MUST follow these rules to avoid syntax errors:
+
+### Node Labels
+- Use double quotes for ALL labels containing non-ASCII characters (Japanese, etc.)
+- Use double quotes for labels with spaces
+- Example: A["ユーザー登録"] --> B["データベース保存"]
+
+### Forbidden Characters in Labels
+NEVER use these characters inside labels (even in quotes):
+- Parentheses: ( )
+- Brackets: [ ] { }
+- Angle brackets: < >
+- Semicolons: ;
+- Colons: : (use full-width ： instead)
+- Pipes: |
+- Quotes inside quotes
+
+### Safe Alternatives
+- Instead of (注意) use 【注意】 or 「注意」
+- Instead of A -> B use A --> B
+- Instead of colons use full-width ： or dashes
+- Keep labels simple and short
+
+### Node IDs
+- Use only alphanumeric characters for node IDs: A, B, node1, step2
+- NEVER use Japanese or special characters in IDs
+
+### Correct Example
+\`\`\`mermaid
+graph TD
+    A["開始"] --> B["処理1"]
+    B --> C{"判定"}
+    C -->|"はい"| D["完了"]
+    C -->|"いいえ"| B
+\`\`\`
+
+### Common Mistakes to Avoid
+- ❌ A[ユーザー(新規)] → Missing quotes, has parentheses
+- ✅ A["ユーザー 新規"]
+- ❌ B --> C[処理: 保存] → Colon in label
+- ✅ B --> C["処理 保存"]
+- ❌ 開始 --> 終了 → Japanese in node IDs
+- ✅ A["開始"] --> B["終了"]`
 
     if (enableTools) {
       systemPrompt += `
 
-## Browser Actions
-You have access to browser automation tools:
-- **click_element**: Click buttons, links, or other interactive elements
-- **fill_element**: Enter text into input fields or textareas
-- **get_html**: Get the HTML structure of elements for inspection
+## Browser Automation Tools
 
-When the user asks you to interact with the page (click something, fill a form, etc.), use these tools.
-Always confirm what action you're about to take before executing it.`
+You have tools to interact with web pages:
+- **click_element**: Click buttons, links, etc.
+- **fill_element**: Enter text into input fields
+- **get_html**: Inspect page structure
+
+### How to Use Tools:
+1. When user asks to click or fill something, call the tool directly.
+2. Choose the most likely CSS selector and try it.
+3. If it fails, use get_html to find the correct selector and retry.
+4. Keep trying up to 3 times with different selectors.
+
+### Best Practices:
+- Act immediately when user requests an action.
+- Be proactive - try the action rather than asking questions.
+- Handle errors by inspecting the page and retrying.`
     }
 
     if (pageContent) {
@@ -222,6 +279,11 @@ ${pageContent.content.slice(0, 30000)}`
       const modelWithTools = this.genAI.getGenerativeModel({
         model: this._modelName,
         tools: [{ functionDeclarations: browserTools }],
+        toolConfig: {
+          functionCallingConfig: {
+            mode: FunctionCallingMode.AUTO, // Let model decide, but with aggressive prompting
+          },
+        },
       })
 
       const chat = modelWithTools.startChat({
@@ -252,8 +314,10 @@ ${pageContent.content.slice(0, 30000)}`
 
       // If there are function calls, return them for execution
       if (functionCalls.length > 0) {
+        console.log('🎯 Gemini returned function calls:', JSON.stringify(functionCalls, null, 2))
         onFunctionCall(functionCalls)
       } else {
+        console.log('📝 Gemini returned text only (no function calls)')
         onComplete(fullText)
       }
     } catch (error) {
@@ -283,6 +347,11 @@ ${pageContent.content.slice(0, 30000)}`
       const modelWithTools = this.genAI.getGenerativeModel({
         model: this._modelName,
         tools: [{ functionDeclarations: browserTools }],
+        toolConfig: {
+          functionCallingConfig: {
+            mode: FunctionCallingMode.AUTO, // Let model decide, but with aggressive prompting
+          },
+        },
       })
 
       const chat = modelWithTools.startChat({

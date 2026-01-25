@@ -25,6 +25,55 @@ turndownService.addRule('removeScripts', {
 })
 
 /**
+ * Try to extract GitHub README content specifically
+ */
+function extractGitHubReadme(): string | null {
+  // GitHub README selectors (try multiple)
+  const selectors = [
+    'article.markdown-body',           // Main README content
+    '[data-target="readme-toc.content"]', // README with TOC
+    '#readme article',                  // README section
+    '.Box-body article',                // Boxed article
+    '.repository-content .markdown-body', // Repository content
+  ]
+
+  for (const selector of selectors) {
+    const element = document.querySelector(selector)
+    if (element && element.innerHTML.trim().length > 100) {
+      console.log('Gemini Side Panel: Found GitHub README with selector:', selector)
+      return turndownService.turndown(element.innerHTML)
+    }
+  }
+
+  return null
+}
+
+/**
+ * Safely clone document for Readability (handles Custom Elements issue)
+ */
+function safeCloneDocument(): Document | null {
+  try {
+    // Try standard cloneNode first
+    return document.cloneNode(true) as Document
+  } catch (e) {
+    console.log('Gemini Side Panel: Standard clone failed, trying alternative method')
+  }
+
+  try {
+    // Alternative: Create a new document and copy innerHTML
+    const parser = new DOMParser()
+    const doctype = document.doctype
+      ? `<!DOCTYPE ${document.doctype.name}>`
+      : '<!DOCTYPE html>'
+    const html = doctype + document.documentElement.outerHTML
+    return parser.parseFromString(html, 'text/html')
+  } catch (e) {
+    console.error('Gemini Side Panel: Alternative clone also failed', e)
+    return null
+  }
+}
+
+/**
  * Extract main content from the current page using Readability
  */
 function extractPageContent(): PageContent {
@@ -32,28 +81,45 @@ function extractPageContent(): PageContent {
   const url = window.location.href
 
   try {
-    // Clone the document to avoid modifying the original
-    const documentClone = document.cloneNode(true) as Document
+    // Special handling for GitHub (do this BEFORE Readability to avoid clone issues)
+    if (url.includes('github.com')) {
+      const readmeContent = extractGitHubReadme()
+      if (readmeContent) {
+        console.log('Gemini Side Panel: Successfully extracted GitHub README')
+        return {
+          title,
+          url,
+          content: readmeContent,
+        }
+      }
+      console.log('Gemini Side Panel: GitHub README not found, trying fallback')
+    }
 
-    // Use Readability to extract main content
-    const reader = new Readability(documentClone, {
-      charThreshold: 100,
-    })
-    const article = reader.parse()
+    // Try to clone the document safely
+    const documentClone = safeCloneDocument()
 
-    if (article && article.content) {
-      // Convert HTML content to Markdown
-      const markdown = turndownService.turndown(article.content)
+    if (documentClone) {
+      // Use Readability to extract main content
+      const reader = new Readability(documentClone, {
+        charThreshold: 100,
+      })
+      const article = reader.parse()
 
-      return {
-        title: article.title || title,
-        url,
-        content: markdown,
-        excerpt: article.excerpt || undefined,
+      if (article && article.content) {
+        // Convert HTML content to Markdown
+        const markdown = turndownService.turndown(article.content)
+
+        return {
+          title: article.title || title,
+          url,
+          content: markdown,
+          excerpt: article.excerpt || undefined,
+        }
       }
     }
 
-    // Fallback: extract text from body if Readability fails
+    // Fallback: extract text from body if Readability fails or clone failed
+    console.log('Gemini Side Panel: Using innerText fallback')
     const bodyText = document.body?.innerText || ''
     const truncatedText = bodyText.slice(0, 10000) // Limit content size
 
@@ -119,7 +185,7 @@ function clickElement(selector: string): ClickElementResult {
  */
 function fillElement(selector: string, value: string): FillElementResult {
   try {
-    const element = document.querySelector(selector) as HTMLInputElement | HTMLTextAreaElement | null
+    const element = document.querySelector(selector) as HTMLElement | null
     if (!element) {
       return {
         success: false,
@@ -127,16 +193,46 @@ function fillElement(selector: string, value: string): FillElementResult {
       }
     }
 
+    // Focus the element first
+    element.focus()
+
+    // Handle contenteditable elements (like X.com's tweet input)
+    if (element.getAttribute('contenteditable') === 'true') {
+      // Clear existing content first using Selection API
+      const selection = window.getSelection()
+      const range = document.createRange()
+      range.selectNodeContents(element)
+      selection?.removeAllRanges()
+      selection?.addRange(range)
+
+      // Use execCommand to simulate human typing (works better with React)
+      // This triggers proper input events that React can detect
+      document.execCommand('delete', false)
+      document.execCommand('insertText', false, value)
+
+      // Also dispatch events for frameworks that need them
+      element.dispatchEvent(new InputEvent('input', {
+        bubbles: true,
+        cancelable: true,
+        inputType: 'insertText',
+        data: value
+      }))
+
+      return {
+        success: true,
+        message: `Filled contenteditable element "${selector}" with value: ${value.slice(0, 50)}${value.length > 50 ? '...' : ''}`,
+      }
+    }
+
     // Check if it's an input or textarea
     if (!(element instanceof HTMLInputElement) && !(element instanceof HTMLTextAreaElement)) {
       return {
         success: false,
-        message: `Element is not an input or textarea: ${selector}`,
+        message: `Element is not an input, textarea, or contenteditable: ${selector}`,
       }
     }
 
-    // Focus and fill
-    element.focus()
+    // Fill input/textarea
     element.value = value
 
     // Dispatch input and change events to trigger any listeners
@@ -189,6 +285,386 @@ function getHtml(selector?: string): GetHtmlResult {
   }
 }
 
+// Test bridge for E2E testing (allows Playwright to trigger content script functions)
+// This listens for window.postMessage and executes the corresponding action
+if (typeof window !== 'undefined') {
+  window.addEventListener('message', (event) => {
+    // Only accept messages from the same window
+    if (event.source !== window) return
+
+    const { type, action, selector, value, testId } = event.data || {}
+
+    // Only respond to our test messages
+    if (type !== 'GEMINI_TEST_BRIDGE') return
+
+    console.log('Gemini Test Bridge: Received', { action, selector, value, testId })
+
+    let result: { success: boolean; message?: string; error?: string; html?: string }
+
+    switch (action) {
+      case 'CLICK_ELEMENT':
+        result = clickElement(selector)
+        break
+      case 'FILL_ELEMENT':
+        result = fillElement(selector, value)
+        break
+      case 'GET_HTML':
+        result = getHtml(selector)
+        break
+      default:
+        result = { success: false, error: `Unknown action: ${action}` }
+    }
+
+    // Send result back
+    window.postMessage(
+      { type: 'GEMINI_TEST_BRIDGE_RESULT', testId, result },
+      '*'
+    )
+  })
+  console.log('Gemini Side Panel: Test bridge initialized')
+}
+
+/**
+ * Show fullscreen Mermaid diagram overlay with Figma-like pan/zoom controls
+ */
+function showMermaidOverlay(svgContent: string): void {
+  // Remove existing overlay if any
+  const existingOverlay = document.getElementById('gemini-mermaid-overlay')
+  if (existingOverlay) {
+    existingOverlay.remove()
+  }
+
+  // State for pan and zoom
+  let zoom = 1
+  let panX = 0
+  let panY = 0
+  let isDragging = false
+  let lastMouseX = 0
+  let lastMouseY = 0
+
+  // Create overlay container
+  const overlay = document.createElement('div')
+  overlay.id = 'gemini-mermaid-overlay'
+  overlay.style.cssText = `
+    position: fixed;
+    inset: 0;
+    z-index: 2147483647;
+    background: rgba(0, 0, 0, 0.95);
+    overflow: hidden;
+    cursor: grab;
+  `
+
+  // Create close button
+  const closeBtn = document.createElement('button')
+  closeBtn.innerHTML = `
+    <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+      <line x1="18" y1="6" x2="6" y2="18"></line>
+      <line x1="6" y1="6" x2="18" y2="18"></line>
+    </svg>
+  `
+  closeBtn.style.cssText = `
+    position: absolute;
+    top: 16px;
+    right: 16px;
+    background: rgba(255, 255, 255, 0.1);
+    border: none;
+    border-radius: 8px;
+    width: 40px;
+    height: 40px;
+    cursor: pointer;
+    color: white;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: background 0.2s;
+    z-index: 10;
+  `
+  closeBtn.onmouseover = () => closeBtn.style.background = 'rgba(255, 255, 255, 0.2)'
+  closeBtn.onmouseout = () => closeBtn.style.background = 'rgba(255, 255, 255, 0.1)'
+
+  // Create zoom indicator
+  const zoomIndicator = document.createElement('div')
+  zoomIndicator.style.cssText = `
+    position: absolute;
+    bottom: 16px;
+    right: 16px;
+    background: rgba(255, 255, 255, 0.1);
+    border-radius: 8px;
+    padding: 8px 12px;
+    color: white;
+    font-family: system-ui, sans-serif;
+    font-size: 13px;
+    z-index: 10;
+  `
+  const updateZoomIndicator = () => {
+    zoomIndicator.textContent = `${Math.round(zoom * 100)}%`
+  }
+  updateZoomIndicator()
+
+  // Create canvas container (for pan/zoom)
+  const canvas = document.createElement('div')
+  canvas.style.cssText = `
+    position: absolute;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  `
+
+  // Create SVG wrapper (this gets transformed)
+  const svgWrapper = document.createElement('div')
+  svgWrapper.style.cssText = `
+    transform-origin: center center;
+    transition: none;
+  `
+  svgWrapper.innerHTML = svgContent
+
+  // Style SVG
+  const svg = svgWrapper.querySelector('svg')
+  let svgWidth = 800
+  let svgHeight = 600
+  if (svg) {
+    svg.style.cssText = `
+      display: block;
+      max-width: none;
+      max-height: none;
+    `
+    // Get or set viewBox
+    if (!svg.getAttribute('viewBox')) {
+      const bbox = svg.getBBox?.()
+      if (bbox && bbox.width && bbox.height) {
+        svg.setAttribute('viewBox', `${bbox.x} ${bbox.y} ${bbox.width} ${bbox.height}`)
+        svgWidth = bbox.width
+        svgHeight = bbox.height
+      }
+    } else {
+      const vb = svg.getAttribute('viewBox')?.split(' ').map(Number)
+      if (vb && vb.length === 4) {
+        svgWidth = vb[2]
+        svgHeight = vb[3]
+      }
+    }
+    // Set initial size
+    svg.setAttribute('width', String(svgWidth))
+    svg.setAttribute('height', String(svgHeight))
+  }
+
+  // Update transform
+  const updateTransform = () => {
+    svgWrapper.style.transform = `translate(${panX}px, ${panY}px) scale(${zoom})`
+    updateZoomIndicator()
+    updateMinimap()
+  }
+
+  // Create minimap
+  const minimap = document.createElement('div')
+  minimap.style.cssText = `
+    position: absolute;
+    top: 16px;
+    left: 16px;
+    width: 180px;
+    height: 120px;
+    background: rgba(30, 30, 30, 0.9);
+    border: 1px solid rgba(255, 255, 255, 0.2);
+    border-radius: 8px;
+    overflow: hidden;
+    z-index: 10;
+  `
+
+  // Minimap SVG (scaled down version)
+  const minimapContent = document.createElement('div')
+  minimapContent.style.cssText = `
+    width: 100%;
+    height: 100%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 8px;
+    box-sizing: border-box;
+  `
+  minimapContent.innerHTML = svgContent
+  const minimapSvg = minimapContent.querySelector('svg')
+  if (minimapSvg) {
+    minimapSvg.style.cssText = `
+      max-width: 100%;
+      max-height: 100%;
+      opacity: 0.7;
+    `
+    minimapSvg.removeAttribute('width')
+    minimapSvg.removeAttribute('height')
+  }
+
+  // Viewport indicator on minimap
+  const viewportIndicator = document.createElement('div')
+  viewportIndicator.style.cssText = `
+    position: absolute;
+    border: 2px solid #3b82f6;
+    background: rgba(59, 130, 246, 0.1);
+    pointer-events: none;
+    transition: none;
+  `
+
+  const updateMinimap = () => {
+    const minimapWidth = 180 - 16 // padding
+    const minimapHeight = 120 - 16
+    const scaleX = minimapWidth / svgWidth
+    const scaleY = minimapHeight / svgHeight
+    const scale = Math.min(scaleX, scaleY)
+
+    // Viewport size in SVG coordinates
+    const viewW = window.innerWidth / zoom
+    const viewH = window.innerHeight / zoom
+
+    // Center offset
+    const centerX = svgWidth / 2
+    const centerY = svgHeight / 2
+
+    // Viewport position in SVG coordinates
+    const viewX = centerX - panX / zoom - viewW / 2
+    const viewY = centerY - panY / zoom - viewH / 2
+
+    // Convert to minimap coordinates
+    const offsetX = (minimapWidth - svgWidth * scale) / 2 + 8
+    const offsetY = (minimapHeight - svgHeight * scale) / 2 + 8
+
+    viewportIndicator.style.left = `${offsetX + viewX * scale}px`
+    viewportIndicator.style.top = `${offsetY + viewY * scale}px`
+    viewportIndicator.style.width = `${Math.max(10, viewW * scale)}px`
+    viewportIndicator.style.height = `${Math.max(10, viewH * scale)}px`
+  }
+
+  minimap.appendChild(minimapContent)
+  minimap.appendChild(viewportIndicator)
+
+  // Pan with mouse drag
+  const onMouseDown = (e: MouseEvent) => {
+    if (e.target === closeBtn || closeBtn.contains(e.target as Node)) return
+    isDragging = true
+    lastMouseX = e.clientX
+    lastMouseY = e.clientY
+    overlay.style.cursor = 'grabbing'
+  }
+
+  const onMouseMove = (e: MouseEvent) => {
+    if (!isDragging) return
+    const dx = e.clientX - lastMouseX
+    const dy = e.clientY - lastMouseY
+    panX += dx
+    panY += dy
+    lastMouseX = e.clientX
+    lastMouseY = e.clientY
+    updateTransform()
+  }
+
+  const onMouseUp = () => {
+    isDragging = false
+    overlay.style.cursor = 'grab'
+  }
+
+  // Zoom with wheel (Ctrl/Shift) or pan without modifier
+  const onWheel = (e: WheelEvent) => {
+    e.preventDefault()
+
+    if (e.ctrlKey || e.shiftKey || e.metaKey) {
+      // Zoom
+      const zoomDelta = e.deltaY > 0 ? 0.9 : 1.1
+      const newZoom = Math.max(0.1, Math.min(10, zoom * zoomDelta))
+
+      // Zoom toward mouse position
+      const rect = canvas.getBoundingClientRect()
+      const mouseX = e.clientX - rect.left - rect.width / 2
+      const mouseY = e.clientY - rect.top - rect.height / 2
+
+      panX = mouseX - (mouseX - panX) * (newZoom / zoom)
+      panY = mouseY - (mouseY - panY) * (newZoom / zoom)
+      zoom = newZoom
+    } else {
+      // Pan
+      panX -= e.deltaX
+      panY -= e.deltaY
+    }
+
+    updateTransform()
+  }
+
+  // Pinch to zoom (gesture events for Safari/macOS)
+  let lastScale = 1
+  const onGestureStart = (e: Event) => {
+    e.preventDefault()
+    lastScale = 1
+  }
+
+  const onGestureChange = (e: Event) => {
+    e.preventDefault()
+    const ge = e as unknown as { scale: number }
+    const scaleDelta = ge.scale / lastScale
+    lastScale = ge.scale
+
+    const newZoom = Math.max(0.1, Math.min(10, zoom * scaleDelta))
+    zoom = newZoom
+    updateTransform()
+  }
+
+  // Close handlers
+  const closeOverlay = () => {
+    document.removeEventListener('keydown', handleKeydown)
+    document.removeEventListener('mousemove', onMouseMove)
+    document.removeEventListener('mouseup', onMouseUp)
+    overlay.remove()
+  }
+
+  const handleKeydown = (e: KeyboardEvent) => {
+    if (e.key === 'Escape') {
+      closeOverlay()
+    }
+    // Reset view with 0 or Home
+    if (e.key === '0' || e.key === 'Home') {
+      zoom = 1
+      panX = 0
+      panY = 0
+      updateTransform()
+    }
+    // Zoom with +/-
+    if (e.key === '=' || e.key === '+') {
+      zoom = Math.min(10, zoom * 1.2)
+      updateTransform()
+    }
+    if (e.key === '-') {
+      zoom = Math.max(0.1, zoom / 1.2)
+      updateTransform()
+    }
+  }
+
+  closeBtn.onclick = (e) => {
+    e.stopPropagation()
+    closeOverlay()
+  }
+
+  // Attach events
+  overlay.addEventListener('mousedown', onMouseDown)
+  document.addEventListener('mousemove', onMouseMove)
+  document.addEventListener('mouseup', onMouseUp)
+  overlay.addEventListener('wheel', onWheel, { passive: false })
+  overlay.addEventListener('gesturestart', onGestureStart)
+  overlay.addEventListener('gesturechange', onGestureChange)
+  document.addEventListener('keydown', handleKeydown)
+
+  // Assemble
+  canvas.appendChild(svgWrapper)
+  overlay.appendChild(canvas)
+  overlay.appendChild(minimap)
+  overlay.appendChild(closeBtn)
+  overlay.appendChild(zoomIndicator)
+  document.body.appendChild(overlay)
+
+  // Focus and initialize
+  overlay.setAttribute('tabindex', '-1')
+  overlay.focus()
+  updateMinimap()
+
+  console.log('Gemini Side Panel: Mermaid overlay shown with pan/zoom controls')
+}
+
 // Listen for messages from Side Panel or Background
 chrome.runtime.onMessage.addListener(
   (
@@ -218,6 +694,16 @@ chrome.runtime.onMessage.addListener(
 
     if (request.action === 'PING') {
       sendResponse({ status: 'PONG' })
+      return true
+    }
+
+    if (request.action === 'SHOW_MERMAID_OVERLAY') {
+      if (request.svgContent) {
+        showMermaidOverlay(request.svgContent)
+        sendResponse({ status: 'OK' })
+      } else {
+        sendResponse({ status: 'ERROR', error: 'No SVG content provided' } as { status: string })
+      }
       return true
     }
 

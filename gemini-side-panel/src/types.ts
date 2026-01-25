@@ -52,6 +52,12 @@ export interface GetHtmlResult {
 
 export type BrowserActionResult = ClickElementResult | FillElementResult | GetHtmlResult
 
+// Mermaid overlay action
+export interface ShowMermaidOverlayAction {
+  action: 'SHOW_MERMAID_OVERLAY'
+  svgContent: string
+}
+
 // Message actions for Chrome messaging
 export type MessageAction =
   | { action: 'GET_PAGE_CONTENT' }
@@ -59,6 +65,7 @@ export type MessageAction =
   | ClickElementAction
   | FillElementAction
   | GetHtmlAction
+  | ShowMermaidOverlayAction
 
 export type MessageResponse<T = unknown> =
   | { success: true; data: T }

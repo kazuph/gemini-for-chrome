@@ -7,7 +7,9 @@
     "dev": "vite",
     "build": "tsc -b && vite build",
     "lint": "eslint .",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "test": "playwright test",
+    "test:ui": "playwright test --ui"
   },
   "dependencies": {
     "@google/generative-ai": "^0.24.1",
@@ -17,6 +19,7 @@
     "dompurify": "^3.3.1",
     "lucide-react": "^0.562.0",
     "marked": "^17.0.1",
+    "mermaid": "^11.12.2",
     "react": "^19.2.0",
     "react-dom": "^19.2.0",
     "tailwind-merge": "^3.4.0",
@@ -25,6 +28,7 @@
   "devDependencies": {
     "@crxjs/vite-plugin": "^2.0.0-beta.33",
     "@eslint/js": "^9.39.1",
+    "@playwright/test": "^1.58.0",
     "@types/chrome": "^0.1.36",
     "@types/dompurify": "^3.0.5",
     "@types/mozilla-readability": "^0.2.1",
