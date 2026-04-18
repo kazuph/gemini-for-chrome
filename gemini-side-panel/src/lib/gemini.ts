@@ -12,13 +12,15 @@ import type { Message, PageContent, GeminiConfig, BrowserAction } from '../types
 const browserTools: FunctionDeclaration[] = [
   {
     name: 'click_element',
-    description: 'IMPORTANT: Use this function to click an element on the page. When user says "click X", call this function immediately with an appropriate CSS selector.',
+    description:
+      'When user says "click X" or wants to press a button/link, call this immediately with an appropriate CSS selector. Uses native CDP mouse events (isTrusted: true) so React/Gmail/X.com accept the click.',
     parameters: {
       type: SchemaType.OBJECT,
       properties: {
         selector: {
           type: SchemaType.STRING,
-          description: 'CSS selector for the element to click (e.g., "button.submit", "#login-btn", "a[href=\'/about\']")',
+          description:
+            'CSS selector for the element to click (e.g., "button.submit", "#login-btn", "a[href=\'/about\']")',
         },
       },
       required: ['selector'],
@@ -26,17 +28,18 @@ const browserTools: FunctionDeclaration[] = [
   },
   {
     name: 'fill_element',
-    description: 'IMPORTANT: Use this function to fill an input field. When user says "enter X in Y" or "fill Y with X", call this function immediately.',
+    description:
+      'When user says "enter X in Y" / "fill Y with X" / "type X into Y", call this immediately. Focuses the element then dispatches per-character native keyDown/keyUp events via CDP (works with React, contenteditable, and Japanese input).',
     parameters: {
       type: SchemaType.OBJECT,
       properties: {
         selector: {
           type: SchemaType.STRING,
-          description: 'CSS selector for the input element to fill (e.g., "input[name=\'email\']", "#search-box", "textarea.comment")',
+          description: 'CSS selector of the input/textarea/contenteditable',
         },
         value: {
           type: SchemaType.STRING,
-          description: 'The text value to enter into the element',
+          description: 'The text value to type',
         },
       },
       required: ['selector', 'value'],
@@ -44,15 +47,168 @@ const browserTools: FunctionDeclaration[] = [
   },
   {
     name: 'get_html',
-    description: 'IMPORTANT: Use this function to get HTML content. When user asks about page structure or wants to see an element, call this function immediately.',
+    description:
+      'When user asks about page structure or you need to discover the correct selector, call this immediately. Returns element outerHTML or the body HTML.',
     parameters: {
       type: SchemaType.OBJECT,
       properties: {
         selector: {
           type: SchemaType.STRING,
-          description: 'Optional CSS selector for a specific element. If omitted, returns the entire page body HTML.',
+          description: 'Optional CSS selector. If omitted, returns the entire body HTML.',
         },
       },
+    },
+  },
+  {
+    name: 'hover_element',
+    description:
+      'When user asks to "hover over X", or when a click does not work because the element only appears on hover (dropdowns, tooltips), call this to dispatch a native mouseMoved event.',
+    parameters: {
+      type: SchemaType.OBJECT,
+      properties: {
+        selector: {
+          type: SchemaType.STRING,
+          description: 'CSS selector of the element to hover',
+        },
+      },
+      required: ['selector'],
+    },
+  },
+  {
+    name: 'scroll_to_element',
+    description:
+      'When user says "scroll to X" or before interacting with an element that may be off-screen, call this to scroll the element into view.',
+    parameters: {
+      type: SchemaType.OBJECT,
+      properties: {
+        selector: {
+          type: SchemaType.STRING,
+          description: 'CSS selector of the element to scroll into view',
+        },
+        block: {
+          type: SchemaType.STRING,
+          description: 'Vertical alignment: "start" | "center" | "end" | "nearest" (default: "nearest")',
+        },
+        behavior: {
+          type: SchemaType.STRING,
+          description: '"auto" (default) or "smooth"',
+        },
+      },
+      required: ['selector'],
+    },
+  },
+  {
+    name: 'focus_element',
+    description:
+      'When user wants to move focus without clicking (keyboard navigation, form ordering), call this. Always consider calling focus_element before fill_element when the target is a form field.',
+    parameters: {
+      type: SchemaType.OBJECT,
+      properties: {
+        selector: {
+          type: SchemaType.STRING,
+          description: 'CSS selector of the focusable element',
+        },
+      },
+      required: ['selector'],
+    },
+  },
+  {
+    name: 'blur_element',
+    description:
+      'When user asks to "deselect", "remove focus", or to trigger blur-based validation, call this. If no selector is given, blurs the current activeElement.',
+    parameters: {
+      type: SchemaType.OBJECT,
+      properties: {
+        selector: {
+          type: SchemaType.STRING,
+          description: 'Optional CSS selector. If omitted, blurs document.activeElement.',
+        },
+      },
+    },
+  },
+  {
+    name: 'right_click_element',
+    description:
+      'When user asks to "right-click X" or open a context menu, call this to dispatch a native mousedown/up with right button.',
+    parameters: {
+      type: SchemaType.OBJECT,
+      properties: {
+        selector: {
+          type: SchemaType.STRING,
+          description: 'CSS selector of the element to right-click',
+        },
+      },
+      required: ['selector'],
+    },
+  },
+  {
+    name: 'double_click_element',
+    description:
+      'When user asks to "double-click X" or needs to trigger a dblclick handler, call this.',
+    parameters: {
+      type: SchemaType.OBJECT,
+      properties: {
+        selector: {
+          type: SchemaType.STRING,
+          description: 'CSS selector of the element to double-click',
+        },
+      },
+      required: ['selector'],
+    },
+  },
+  {
+    name: 'select_text',
+    description:
+      'When user asks to "select all text in X" or to highlight a range, call this. Useful before fill_element on a field that already has content so the typed text replaces the old value.',
+    parameters: {
+      type: SchemaType.OBJECT,
+      properties: {
+        selector: {
+          type: SchemaType.STRING,
+          description: 'CSS selector of the element whose text should be selected',
+        },
+        start: {
+          type: SchemaType.NUMBER,
+          description: 'Optional selection start index (use with end)',
+        },
+        end: {
+          type: SchemaType.NUMBER,
+          description: 'Optional selection end index (use with start)',
+        },
+      },
+      required: ['selector'],
+    },
+  },
+  {
+    name: 'press_key',
+    description:
+      'When user asks to "press Enter" / "hit Escape" / "Tab to the next field" or you need to submit a form after filling, call this. Supported keys: Enter, Tab, Escape, Backspace, Delete, ArrowUp/Down/Left/Right, Home, End, PageUp, PageDown, Space, F1-F12, and single letters/digits.',
+    parameters: {
+      type: SchemaType.OBJECT,
+      properties: {
+        key: {
+          type: SchemaType.STRING,
+          description: 'The key to press, e.g. "Enter", "Escape", "ArrowDown", "a"',
+        },
+      },
+      required: ['key'],
+    },
+  },
+  {
+    name: 'press_key_combination',
+    description:
+      'When user asks for a shortcut like Ctrl+S, Cmd+A, Ctrl+Shift+P, call this with the ordered list of keys. Modifiers are held down while the main key is pressed, then released in reverse. Use "Control", "Meta", "Alt", "Shift" for modifiers.',
+    parameters: {
+      type: SchemaType.OBJECT,
+      properties: {
+        keys: {
+          type: SchemaType.ARRAY,
+          description:
+            'Ordered list, e.g. ["Control", "s"] or ["Meta", "Shift", "p"]. Exactly one non-modifier key.',
+          items: { type: SchemaType.STRING },
+        },
+      },
+      required: ['keys'],
     },
   },
 ]
@@ -61,6 +217,13 @@ const browserTools: FunctionDeclaration[] = [
 export interface FunctionCallResult {
   name: string
   response: unknown
+}
+
+// AbortSignal の aborted をストリームループ反復毎にチェックしてユーザー操作で止められるようにする
+function throwIfAborted(signal?: AbortSignal): void {
+  if (signal?.aborted) {
+    throw new DOMException('Aborted', 'AbortError')
+  }
 }
 
 // Type for chat response with potential function calls
@@ -149,23 +312,43 @@ graph TD
     if (enableTools) {
       systemPrompt += `
 
-## Browser Automation Tools
+## Browser Automation Tools (CDP-powered, isTrusted:true)
 
-You have tools to interact with web pages:
-- **click_element**: Click buttons, links, etc.
-- **fill_element**: Enter text into input fields
-- **get_html**: Inspect page structure
+Pointer tools:
+- **click_element**: click any button/link
+- **right_click_element**: open context menu
+- **double_click_element**: trigger dblclick
+- **hover_element**: dispatch mouseMoved (use to reveal hover-only menus/tooltips)
 
-### How to Use Tools:
-1. When user asks to click or fill something, call the tool directly.
-2. Choose the most likely CSS selector and try it.
-3. If it fails, use get_html to find the correct selector and retry.
-4. Keep trying up to 3 times with different selectors.
+Scroll & focus:
+- **scroll_to_element**: bring an element into view (use before interacting with off-screen items)
+- **focus_element**: move focus without clicking
+- **blur_element**: drop focus (commit blur-based validation)
 
-### Best Practices:
-- Act immediately when user requests an action.
-- Be proactive - try the action rather than asking questions.
-- Handle errors by inspecting the page and retrying.`
+Text editing:
+- **select_text**: highlight text (full element or range)
+- **fill_element**: type into input/textarea/contenteditable
+
+Keyboard:
+- **press_key**: Enter / Tab / Escape / Arrow keys / single char
+- **press_key_combination**: Ctrl+S, Cmd+A, etc. (modifiers + one key)
+
+Inspection:
+- **get_html**: inspect structure when a selector guess fails
+
+### How to decide
+1. Act immediately for action requests; do not ask clarifying questions first.
+2. Choose the most likely CSS selector and try the direct tool (e.g. click_element).
+3. If a click does not react (menus, dropdowns), call hover_element first, then click_element.
+4. Before filling a form field, prefer focus_element (and select_text when replacing existing text) then fill_element.
+5. To submit a form after fill_element, call press_key with "Enter".
+6. If the target is off-screen, call scroll_to_element before clicking/typing.
+7. On failure, call get_html (with a nearby selector) to discover the real markup, then retry (max 3 attempts).
+
+### Selector guidance
+- Prefer unique attributes: id, name, data-testid, aria-label.
+- Avoid chaining more than 3 levels.
+- For Gmail/X.com/React apps, text-based selectors break often; use stable attributes.`
     }
 
     if (pageContent) {
@@ -229,9 +412,11 @@ ${pageContent.content.slice(0, 30000)}`
     pageContent: PageContent | undefined,
     onChunk: (chunk: string) => void,
     onComplete: (fullText: string) => void,
-    onError: (error: Error) => void
+    onError: (error: Error) => void,
+    signal?: AbortSignal
   ): Promise<void> {
     try {
+      throwIfAborted(signal)
       const systemPrompt = this.buildSystemPrompt(pageContent)
       const chatHistory = this.buildChatHistory(history)
 
@@ -247,6 +432,7 @@ ${pageContent.content.slice(0, 30000)}`
       let fullText = ''
 
       for await (const chunk of result.stream) {
+        throwIfAborted(signal)
         const chunkText = chunk.text()
         fullText += chunkText
         onChunk(chunkText)
@@ -254,6 +440,10 @@ ${pageContent.content.slice(0, 30000)}`
 
       onComplete(fullText)
     } catch (error) {
+      if (error instanceof DOMException && error.name === 'AbortError') {
+        onError(error)
+        return
+      }
       console.error('Gemini API Error:', error)
       onError(error instanceof Error ? error : new Error(String(error)))
     }
@@ -270,9 +460,11 @@ ${pageContent.content.slice(0, 30000)}`
     onChunk: (chunk: string) => void,
     onComplete: (fullText: string) => void,
     onFunctionCall: (functionCalls: FunctionCall[]) => void,
-    onError: (error: Error) => void
+    onError: (error: Error) => void,
+    signal?: AbortSignal
   ): Promise<void> {
     try {
+      throwIfAborted(signal)
       const systemPrompt = this.buildSystemPrompt(pageContent, true)
       const chatHistory = this.buildChatHistory(history)
 
@@ -299,6 +491,7 @@ ${pageContent.content.slice(0, 30000)}`
       let functionCalls: FunctionCall[] = []
 
       for await (const chunk of result.stream) {
+        throwIfAborted(signal)
         const chunkText = chunk.text()
         if (chunkText) {
           fullText += chunkText
@@ -314,13 +507,17 @@ ${pageContent.content.slice(0, 30000)}`
 
       // If there are function calls, return them for execution
       if (functionCalls.length > 0) {
-        console.log('🎯 Gemini returned function calls:', JSON.stringify(functionCalls, null, 2))
+        console.log('Gemini returned function calls:', JSON.stringify(functionCalls, null, 2))
         onFunctionCall(functionCalls)
       } else {
-        console.log('📝 Gemini returned text only (no function calls)')
+        console.log('Gemini returned text only (no function calls)')
         onComplete(fullText)
       }
     } catch (error) {
+      if (error instanceof DOMException && error.name === 'AbortError') {
+        onError(error)
+        return
+      }
       console.error('Gemini API Error with tools:', error)
       onError(error instanceof Error ? error : new Error(String(error)))
     }
@@ -338,9 +535,11 @@ ${pageContent.content.slice(0, 30000)}`
     onChunk: (chunk: string) => void,
     onComplete: (fullText: string) => void,
     onFunctionCall: (functionCalls: FunctionCall[]) => void,
-    onError: (error: Error) => void
+    onError: (error: Error) => void,
+    signal?: AbortSignal
   ): Promise<void> {
     try {
+      throwIfAborted(signal)
       const systemPrompt = this.buildSystemPrompt(pageContent, true)
       const chatHistory = this.buildChatHistory(history)
 
@@ -383,6 +582,7 @@ ${pageContent.content.slice(0, 30000)}`
       let newFunctionCalls: FunctionCall[] = []
 
       for await (const chunk of result.stream) {
+        throwIfAborted(signal)
         const chunkText = chunk.text()
         if (chunkText) {
           fullText += chunkText
@@ -401,6 +601,10 @@ ${pageContent.content.slice(0, 30000)}`
         onComplete(fullText)
       }
     } catch (error) {
+      if (error instanceof DOMException && error.name === 'AbortError') {
+        onError(error)
+        return
+      }
       console.error('Gemini API Error sending function results:', error)
       onError(error instanceof Error ? error : new Error(String(error)))
     }
@@ -410,25 +614,61 @@ ${pageContent.content.slice(0, 30000)}`
    * Convert function call to browser action
    */
   static functionCallToBrowserAction(functionCall: FunctionCall): BrowserAction | null {
-    const args = functionCall.args as Record<string, string>
+    const args = (functionCall.args ?? {}) as Record<string, unknown>
+    const str = (v: unknown): string => (typeof v === 'string' ? v : '')
+    const optStr = (v: unknown): string | undefined => (typeof v === 'string' ? v : undefined)
+    const optNum = (v: unknown): number | undefined =>
+      typeof v === 'number' ? v : typeof v === 'string' && v.trim() !== '' ? Number(v) : undefined
 
     switch (functionCall.name) {
       case 'click_element':
-        return {
-          action: 'CLICK_ELEMENT',
-          selector: args.selector,
-        }
+        return { action: 'CLICK_ELEMENT', selector: str(args.selector) }
       case 'fill_element':
         return {
           action: 'FILL_ELEMENT',
-          selector: args.selector,
-          value: args.value,
+          selector: str(args.selector),
+          value: str(args.value),
         }
       case 'get_html':
+        return { action: 'GET_HTML', selector: optStr(args.selector) }
+      case 'hover_element':
+        return { action: 'HOVER_ELEMENT', selector: str(args.selector) }
+      case 'scroll_to_element': {
+        const behavior = optStr(args.behavior)
+        const block = optStr(args.block)
         return {
-          action: 'GET_HTML',
-          selector: args.selector,
+          action: 'SCROLL_INTO_VIEW',
+          selector: str(args.selector),
+          behavior: behavior === 'smooth' || behavior === 'auto' ? behavior : undefined,
+          block:
+            block === 'start' || block === 'center' || block === 'end' || block === 'nearest'
+              ? block
+              : undefined,
         }
+      }
+      case 'focus_element':
+        return { action: 'FOCUS_ELEMENT', selector: str(args.selector) }
+      case 'blur_element':
+        return { action: 'BLUR_ELEMENT', selector: optStr(args.selector) }
+      case 'right_click_element':
+        return { action: 'RIGHT_CLICK_ELEMENT', selector: str(args.selector) }
+      case 'double_click_element':
+        return { action: 'DOUBLE_CLICK_ELEMENT', selector: str(args.selector) }
+      case 'select_text':
+        return {
+          action: 'SELECT_TEXT',
+          selector: str(args.selector),
+          start: optNum(args.start),
+          end: optNum(args.end),
+        }
+      case 'press_key':
+        return { action: 'PRESS_KEY', key: str(args.key) }
+      case 'press_key_combination': {
+        const keys = Array.isArray(args.keys)
+          ? args.keys.filter((k): k is string => typeof k === 'string')
+          : []
+        return { action: 'PRESS_KEY_COMBINATION', keys }
+      }
       default:
         return null
     }

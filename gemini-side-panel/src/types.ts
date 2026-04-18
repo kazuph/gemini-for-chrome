@@ -31,7 +31,68 @@ export interface GetHtmlAction {
   selector?: string
 }
 
-export type BrowserAction = ClickElementAction | FillElementAction | GetHtmlAction
+export interface HoverElementAction {
+  action: 'HOVER_ELEMENT'
+  selector: string
+}
+
+export interface FocusElementAction {
+  action: 'FOCUS_ELEMENT'
+  selector: string
+}
+
+export interface BlurElementAction {
+  action: 'BLUR_ELEMENT'
+  selector?: string
+}
+
+export interface ScrollIntoViewAction {
+  action: 'SCROLL_INTO_VIEW'
+  selector: string
+  behavior?: 'auto' | 'smooth'
+  block?: 'start' | 'center' | 'end' | 'nearest'
+}
+
+export interface RightClickElementAction {
+  action: 'RIGHT_CLICK_ELEMENT'
+  selector: string
+}
+
+export interface DoubleClickElementAction {
+  action: 'DOUBLE_CLICK_ELEMENT'
+  selector: string
+}
+
+export interface SelectTextAction {
+  action: 'SELECT_TEXT'
+  selector: string
+  start?: number
+  end?: number
+}
+
+export interface PressKeyAction {
+  action: 'PRESS_KEY'
+  key: string
+}
+
+export interface PressKeyCombinationAction {
+  action: 'PRESS_KEY_COMBINATION'
+  keys: string[]
+}
+
+export type BrowserAction =
+  | ClickElementAction
+  | FillElementAction
+  | GetHtmlAction
+  | HoverElementAction
+  | FocusElementAction
+  | BlurElementAction
+  | ScrollIntoViewAction
+  | RightClickElementAction
+  | DoubleClickElementAction
+  | SelectTextAction
+  | PressKeyAction
+  | PressKeyCombinationAction
 
 // Browser action results
 export interface ClickElementResult {
@@ -50,7 +111,16 @@ export interface GetHtmlResult {
   error?: string
 }
 
-export type BrowserActionResult = ClickElementResult | FillElementResult | GetHtmlResult
+export interface GenericActionResult {
+  success: boolean
+  message: string
+}
+
+export type BrowserActionResult =
+  | ClickElementResult
+  | FillElementResult
+  | GetHtmlResult
+  | GenericActionResult
 
 // Mermaid overlay action
 export interface ShowMermaidOverlayAction {
@@ -65,6 +135,15 @@ export type MessageAction =
   | ClickElementAction
   | FillElementAction
   | GetHtmlAction
+  | HoverElementAction
+  | FocusElementAction
+  | BlurElementAction
+  | ScrollIntoViewAction
+  | RightClickElementAction
+  | DoubleClickElementAction
+  | SelectTextAction
+  | PressKeyAction
+  | PressKeyCombinationAction
   | ShowMermaidOverlayAction
 
 export type MessageResponse<T = unknown> =

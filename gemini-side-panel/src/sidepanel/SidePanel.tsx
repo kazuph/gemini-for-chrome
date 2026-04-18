@@ -1,20 +1,29 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
-import { Settings, AlertCircle, Plus, Minus, Sun, Moon, Monitor, PlusCircle, MousePointer2 } from 'lucide-react'
+import { Settings, AlertCircle, Plus, Minus } from 'lucide-react'
 import type { FunctionCall } from '@google/generative-ai'
 import type { Message, PageContent, MessageResponse, UISettings, ThemeMode, BrowserActionResult } from '../types'
 import { DEFAULT_UI_SETTINGS } from '../types'
 import { GeminiChat, loadGeminiConfig, type FunctionCallResult } from '../lib/gemini'
 import { generateId, cn, loadUISettings, saveUISettings, getEffectiveTheme } from '../lib/utils'
 import { MessageBubble, ChatInput, LoadingIndicator } from '../components'
+import { GEMINI_MODEL_GROUPS, CUSTOM_MODEL_VALUE, isKnownModel } from '../lib/models'
 
 const MIN_FONT_SIZE = 14
 const MAX_FONT_SIZE = 26
-const FONT_STEP = 4
+const FONT_STEP = 2
+const MAX_FUNCTION_CALL_TURNS = 10
+
+const THEME_MODE_OPTIONS: { value: ThemeMode; label: string }[] = [
+  { value: 'light', label: 'Light' },
+  { value: 'dark', label: 'Dark' },
+  { value: 'system', label: 'System' },
+]
 
 export default function SidePanel() {
   // API configuration state
   const [apiKey, setApiKey] = useState<string>('')
   const [modelName, setModelName] = useState<string>('gemini-2.0-flash')
+  const [modelSelectValue, setModelSelectValue] = useState<string>('gemini-2.0-flash')
   const [hasKey, setHasKey] = useState<boolean>(false)
   const [showConfig, setShowConfig] = useState<boolean>(false)
 
@@ -37,6 +46,13 @@ export default function SidePanel() {
   // Refs
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const geminiChatRef = useRef<GeminiChat | null>(null)
+  const abortControllerRef = useRef<AbortController | null>(null)
+  // 最新の streaming 内容を abort ハンドラで保存するため、state と並行して ref に持つ
+  const streamingContentRef = useRef<string>('')
+
+  useEffect(() => {
+    streamingContentRef.current = streamingContent
+  }, [streamingContent])
 
   // Update effective theme when settings or system preference changes
   useEffect(() => {
@@ -95,6 +111,7 @@ export default function SidePanel() {
       if (config) {
         setApiKey(config.apiKey)
         setModelName(config.modelName)
+        setModelSelectValue(isKnownModel(config.modelName) ? config.modelName : CUSTOM_MODEL_VALUE)
         setHasKey(true)
         geminiChatRef.current = new GeminiChat(config)
       }
@@ -106,6 +123,7 @@ export default function SidePanel() {
   // Fetch page content when panel opens and listen for tab changes
   useEffect(() => {
     if (hasKey && !showConfig) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect
       fetchPageContent()
 
       // Listen for tab activation changes
@@ -173,20 +191,17 @@ export default function SidePanel() {
   }
 
   /**
-   * Cycle through theme modes
-   */
-  const cycleThemeMode = () => {
-    const modes: ThemeMode[] = ['system', 'light', 'dark']
-    const currentIndex = modes.indexOf(uiSettings.themeMode)
-    const nextIndex = (currentIndex + 1) % modes.length
-    updateUISettings({ themeMode: modes[nextIndex] })
-  }
-
-  /**
    * Execute browser actions from function calls
    */
   const executeBrowserAction = useCallback(
-    async (functionCall: FunctionCall): Promise<FunctionCallResult> => {
+    async (functionCall: FunctionCall, signal?: AbortSignal): Promise<FunctionCallResult> => {
+      if (signal?.aborted) {
+        return {
+          name: functionCall.name,
+          response: { success: false, error: 'Aborted by user' },
+        }
+      }
+
       const browserAction = GeminiChat.functionCallToBrowserAction(functionCall)
 
       if (!browserAction) {
@@ -227,6 +242,25 @@ export default function SidePanel() {
   )
 
   /**
+   * Commit the current streaming buffer as an assistant message (used on abort / max turns)
+   */
+  const commitStreamingAsAssistant = useCallback((suffix?: string) => {
+    const current = streamingContentRef.current
+    const finalText = suffix ? `${current}${current ? '\n\n' : ''}${suffix}` : current
+    if (finalText.trim().length > 0) {
+      const assistantMessage: Message = {
+        id: generateId(),
+        role: 'assistant',
+        content: finalText,
+        timestamp: Date.now(),
+      }
+      setMessages((prev) => [...prev, assistantMessage])
+    }
+    setStreamingContent('')
+    streamingContentRef.current = ''
+  }, [])
+
+  /**
    * Send a message to Gemini
    * Always fetches fresh page content when includePageContent is true
    * Supports Function Calling for browser actions
@@ -237,6 +271,12 @@ export default function SidePanel() {
         setError('Gemini API not configured. Please add your API key.')
         return
       }
+
+      // 古い AbortController があれば破棄して、この送信専用の新しいものを生成
+      abortControllerRef.current?.abort()
+      const controller = new AbortController()
+      abortControllerRef.current = controller
+      const signal = controller.signal
 
       // Add user message
       const userMessage: Message = {
@@ -249,6 +289,7 @@ export default function SidePanel() {
       setIsLoading(true)
       setError(null)
       setStreamingContent('')
+      streamingContentRef.current = ''
 
       // If including page content, always fetch fresh content
       let currentPageContent: PageContent | undefined = undefined
@@ -267,6 +308,10 @@ export default function SidePanel() {
             })
           })
 
+          if (signal.aborted) {
+            return
+          }
+
           if (response.success) {
             currentPageContent = response.data
             setPageContent(response.data) // Update stored content too
@@ -282,20 +327,38 @@ export default function SidePanel() {
         }
       }
 
-      // Handler for function calls
+      const isAbortError = (error: Error): boolean =>
+        (error instanceof DOMException && error.name === 'AbortError') || error.name === 'AbortError'
+
+      // Handler for function calls with recursion depth cap
       const handleFunctionCalls = async (
         functionCalls: FunctionCall[],
         currentMessages: Message[],
-        pageCtx: PageContent | undefined
-      ) => {
+        pageCtx: PageContent | undefined,
+        depth: number
+      ): Promise<void> => {
+        if (signal.aborted) return
+
+        if (depth >= MAX_FUNCTION_CALL_TURNS) {
+          commitStreamingAsAssistant(
+            `> Reached max function call turns (${MAX_FUNCTION_CALL_TURNS}). Stopping to prevent infinite loop.`
+          )
+          setError(`Reached max function call turns (${MAX_FUNCTION_CALL_TURNS}). Stopping to prevent infinite loop.`)
+          setIsLoading(false)
+          abortControllerRef.current?.abort()
+          return
+        }
+
         // Show what actions are being executed
         const actionNames = functionCalls.map((fc) => fc.name).join(', ')
         setStreamingContent((prev) => prev + `\n\n*Executing: ${actionNames}...*\n`)
 
-        // Execute all function calls
+        // Execute all function calls (pass signal so each can bail early)
         const results: FunctionCallResult[] = await Promise.all(
-          functionCalls.map((fc) => executeBrowserAction(fc))
+          functionCalls.map((fc) => executeBrowserAction(fc, signal))
         )
+
+        if (signal.aborted) return
 
         // Show results
         const resultSummary = results
@@ -312,11 +375,9 @@ export default function SidePanel() {
           pageCtx,
           functionCalls,
           results,
-          // onChunk
           (chunk) => {
             setStreamingContent((prev) => prev + chunk)
           },
-          // onComplete
           (fullText) => {
             const assistantMessage: Message = {
               id: generateId(),
@@ -326,18 +387,24 @@ export default function SidePanel() {
             }
             setMessages((prev) => [...prev, assistantMessage])
             setStreamingContent('')
+            streamingContentRef.current = ''
             setIsLoading(false)
           },
-          // onFunctionCall - recursive handling for chained function calls
           async (newFunctionCalls) => {
-            await handleFunctionCalls(newFunctionCalls, currentMessages, pageCtx)
+            await handleFunctionCalls(newFunctionCalls, currentMessages, pageCtx, depth + 1)
           },
-          // onError
           (error) => {
+            if (isAbortError(error)) {
+              commitStreamingAsAssistant('> Stopped by user.')
+              setIsLoading(false)
+              return
+            }
             setError(error.message || 'An error occurred while processing function results')
             setStreamingContent('')
+            streamingContentRef.current = ''
             setIsLoading(false)
-          }
+          },
+          signal
         )
       }
 
@@ -348,11 +415,9 @@ export default function SidePanel() {
             content,
             messages,
             currentPageContent,
-            // onChunk
             (chunk) => {
               setStreamingContent((prev) => prev + chunk)
             },
-            // onComplete
             (fullText) => {
               const assistantMessage: Message = {
                 id: generateId(),
@@ -362,18 +427,24 @@ export default function SidePanel() {
               }
               setMessages((prev) => [...prev, assistantMessage])
               setStreamingContent('')
+              streamingContentRef.current = ''
               setIsLoading(false)
             },
-            // onFunctionCall
             async (functionCalls) => {
-              await handleFunctionCalls(functionCalls, messages, currentPageContent)
+              await handleFunctionCalls(functionCalls, messages, currentPageContent, 0)
             },
-            // onError
             (error) => {
+              if (isAbortError(error)) {
+                commitStreamingAsAssistant('> Stopped by user.')
+                setIsLoading(false)
+                return
+              }
               setError(error.message || 'An error occurred while generating a response')
               setStreamingContent('')
+              streamingContentRef.current = ''
               setIsLoading(false)
-            }
+            },
+            signal
           )
         } else {
           // Use regular sendMessageStream (no browser actions)
@@ -381,11 +452,9 @@ export default function SidePanel() {
             content,
             messages,
             currentPageContent,
-            // onChunk
             (chunk) => {
               setStreamingContent((prev) => prev + chunk)
             },
-            // onComplete
             (fullText) => {
               const assistantMessage: Message = {
                 id: generateId(),
@@ -395,25 +464,45 @@ export default function SidePanel() {
               }
               setMessages((prev) => [...prev, assistantMessage])
               setStreamingContent('')
+              streamingContentRef.current = ''
               setIsLoading(false)
             },
-            // onError
             (error) => {
+              if (isAbortError(error)) {
+                commitStreamingAsAssistant('> Stopped by user.')
+                setIsLoading(false)
+                return
+              }
               setError(error.message || 'An error occurred while generating a response')
               setStreamingContent('')
+              streamingContentRef.current = ''
               setIsLoading(false)
-            }
+            },
+            signal
           )
         }
       } catch (err) {
+        if (err instanceof Error && isAbortError(err)) {
+          commitStreamingAsAssistant('> Stopped by user.')
+          setIsLoading(false)
+          return
+        }
         console.error('Chat error:', err)
         setError(err instanceof Error ? err.message : 'An unexpected error occurred')
         setStreamingContent('')
+        streamingContentRef.current = ''
         setIsLoading(false)
       }
     },
-    [messages, executeBrowserAction, browserActionMode]
+    [messages, executeBrowserAction, browserActionMode, commitStreamingAsAssistant]
   )
+
+  /**
+   * Stop the current generation (abort streaming + commit partial output)
+   */
+  const handleStop = useCallback(() => {
+    abortControllerRef.current?.abort()
+  }, [])
 
   /**
    * Clear chat history
@@ -488,21 +577,118 @@ export default function SidePanel() {
               </div>
 
               <div>
-                <label className={cn('block text-xs mb-1.5', theme.textSecondary)}>Model Name</label>
-                <input
-                  type="text"
+                <label className={cn('block text-xs mb-1.5', theme.textSecondary)}>Model</label>
+                <select
                   className={cn(
                     'w-full p-3 rounded-lg border outline-none transition-colors',
                     'focus:border-blue-500 focus:ring-1 focus:ring-blue-500',
                     theme.input,
                     theme.text
                   )}
-                  placeholder="gemini-2.0-flash"
-                  value={modelName}
-                  onChange={(e) => setModelName(e.target.value)}
-                />
+                  value={modelSelectValue}
+                  onChange={(e) => {
+                    const v = e.target.value
+                    setModelSelectValue(v)
+                    if (v !== CUSTOM_MODEL_VALUE) {
+                      setModelName(v)
+                    }
+                  }}
+                >
+                  {GEMINI_MODEL_GROUPS.map((group) => (
+                    <optgroup key={group.label} label={group.label}>
+                      {group.models.map((m) => (
+                        <option key={m.id} value={m.id}>
+                          {m.label}
+                        </option>
+                      ))}
+                    </optgroup>
+                  ))}
+                  <optgroup label="カスタム">
+                    <option value={CUSTOM_MODEL_VALUE}>カスタム (自由入力)</option>
+                  </optgroup>
+                </select>
+                {modelSelectValue === CUSTOM_MODEL_VALUE && (
+                  <input
+                    type="text"
+                    className={cn(
+                      'mt-2 w-full p-3 rounded-lg border outline-none transition-colors',
+                      'focus:border-blue-500 focus:ring-1 focus:ring-blue-500',
+                      theme.input,
+                      theme.text
+                    )}
+                    placeholder="gemini-2.0-flash"
+                    value={modelName}
+                    onChange={(e) => setModelName(e.target.value)}
+                  />
+                )}
                 <p className={cn('mt-1.5 text-xs', theme.textTertiary)}>
-                  Examples: gemini-2.0-flash, gemini-2.5-flash
+                  Current: <code>{modelName || '(empty)'}</code>
+                </p>
+              </div>
+
+              <div>
+                <label className={cn('block text-xs mb-1.5', theme.textSecondary)}>Theme</label>
+                <div className="flex gap-2">
+                  {THEME_MODE_OPTIONS.map((opt) => {
+                    const selected = uiSettings.themeMode === opt.value
+                    return (
+                      <button
+                        key={opt.value}
+                        type="button"
+                        onClick={() => updateUISettings({ themeMode: opt.value })}
+                        className={cn(
+                          'flex-1 py-2 px-3 rounded-lg border text-sm font-medium transition-colors',
+                          selected
+                            ? 'bg-blue-600 border-blue-500 text-white hover:bg-blue-500'
+                            : cn(theme.input, theme.text, theme.hover)
+                        )}
+                      >
+                        {opt.label}
+                      </button>
+                    )
+                  })}
+                </div>
+              </div>
+
+              <div>
+                <label className={cn('block text-xs mb-1.5', theme.textSecondary)}>
+                  Font Size
+                </label>
+                <div className={cn('flex items-center gap-2 p-2 rounded-lg border', theme.input)}>
+                  <button
+                    type="button"
+                    onClick={() => changeFontSize(-FONT_STEP)}
+                    disabled={uiSettings.fontSize <= MIN_FONT_SIZE}
+                    className={cn(
+                      'p-2 rounded-md transition-colors',
+                      theme.textSecondary,
+                      theme.hover,
+                      'disabled:opacity-30 disabled:cursor-not-allowed'
+                    )}
+                    title="Decrease font size"
+                  >
+                    <Minus className="w-4 h-4" />
+                  </button>
+                  <div className={cn('flex-1 text-center text-sm tabular-nums', theme.text)}>
+                    {uiSettings.fontSize}px
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => changeFontSize(FONT_STEP)}
+                    disabled={uiSettings.fontSize >= MAX_FONT_SIZE}
+                    className={cn(
+                      'p-2 rounded-md transition-colors',
+                      theme.textSecondary,
+                      theme.hover,
+                      'disabled:opacity-30 disabled:cursor-not-allowed'
+                    )}
+                    title="Increase font size"
+                  >
+                    <Plus className="w-4 h-4" />
+                  </button>
+                </div>
+                <p className={cn('mt-1.5 text-xs', theme.textTertiary)}>
+                  Range: {MIN_FONT_SIZE}px – {MAX_FONT_SIZE}px
                 </p>
               </div>
 
@@ -534,66 +720,6 @@ export default function SidePanel() {
         </div>
 
         <div className="flex items-center gap-1">
-          {/* Font size controls */}
-          <button
-            onClick={() => changeFontSize(-FONT_STEP)}
-            disabled={uiSettings.fontSize <= MIN_FONT_SIZE}
-            className={cn(
-              'p-2 rounded-lg transition-colors',
-              theme.textSecondary,
-              theme.hover,
-              'disabled:opacity-30 disabled:cursor-not-allowed'
-            )}
-            title="Decrease font size"
-          >
-            <Minus className="w-4 h-4" />
-          </button>
-          <span className={cn('text-xs w-8 text-center', theme.textTertiary)}>
-            {uiSettings.fontSize}
-          </span>
-          <button
-            onClick={() => changeFontSize(FONT_STEP)}
-            disabled={uiSettings.fontSize >= MAX_FONT_SIZE}
-            className={cn(
-              'p-2 rounded-lg transition-colors',
-              theme.textSecondary,
-              theme.hover,
-              'disabled:opacity-30 disabled:cursor-not-allowed'
-            )}
-            title="Increase font size"
-          >
-            <Plus className="w-4 h-4" />
-          </button>
-
-          {/* Browser action mode toggle */}
-          <button
-            onClick={() => setBrowserActionMode(!browserActionMode)}
-            className={cn(
-              'p-2 rounded-lg transition-colors',
-              browserActionMode
-                ? 'bg-blue-600 text-white hover:bg-blue-500'
-                : theme.textSecondary + ' ' + theme.hover
-            )}
-            title={browserActionMode ? 'Browser actions: ON (can click/fill)' : 'Browser actions: OFF (chat only)'}
-          >
-            <MousePointer2 className="w-4 h-4" />
-          </button>
-
-          {/* Theme toggle */}
-          <button
-            onClick={cycleThemeMode}
-            className={cn('p-2 rounded-lg transition-colors', theme.textSecondary, theme.hover)}
-            title={`Theme: ${uiSettings.themeMode}`}
-          >
-            {uiSettings.themeMode === 'system' ? (
-              <Monitor className="w-4 h-4" />
-            ) : uiSettings.themeMode === 'light' ? (
-              <Sun className="w-4 h-4" />
-            ) : (
-              <Moon className="w-4 h-4" />
-            )}
-          </button>
-
           {/* New chat */}
           <button
             onClick={handleClearChat}
@@ -604,7 +730,7 @@ export default function SidePanel() {
             )}
             title="New chat"
           >
-            <PlusCircle className="w-4 h-4" />
+            <Plus className="w-4 h-4" />
           </button>
 
           {/* Settings */}
@@ -659,7 +785,7 @@ export default function SidePanel() {
                   id: 'streaming',
                   role: 'assistant',
                   content: streamingContent,
-                  timestamp: Date.now(),
+                  timestamp: 0,
                 }}
                 theme={effectiveTheme}
                 fontSize={uiSettings.fontSize}
@@ -693,8 +819,11 @@ export default function SidePanel() {
       {/* Input area */}
       <ChatInput
         onSend={handleSendMessage}
+        onStop={handleStop}
         isLoading={isLoading}
         theme={effectiveTheme}
+        browserActionMode={browserActionMode}
+        onToggleBrowserActionMode={() => setBrowserActionMode((prev) => !prev)}
       />
     </div>
   )

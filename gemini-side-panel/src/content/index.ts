@@ -7,6 +7,7 @@ import type {
   ClickElementResult,
   FillElementResult,
   GetHtmlResult,
+  GenericActionResult,
 } from '../types'
 
 console.log('Gemini Side Panel: Content script loaded')
@@ -55,7 +56,7 @@ function safeCloneDocument(): Document | null {
   try {
     // Try standard cloneNode first
     return document.cloneNode(true) as Document
-  } catch (e) {
+  } catch {
     console.log('Gemini Side Panel: Standard clone failed, trying alternative method')
   }
 
@@ -247,6 +248,96 @@ function fillElement(selector: string, value: string): FillElementResult {
     return {
       success: false,
       message: `Error filling element: ${error instanceof Error ? error.message : String(error)}`,
+    }
+  }
+}
+
+/**
+ * Hover (fallback): dispatch mouseover/mouseenter/mousemove events.
+ * Note: these are isTrusted:false and may be ignored by bot-resistant sites.
+ */
+function hoverElement(selector: string): GenericActionResult {
+  try {
+    const element = document.querySelector(selector) as HTMLElement | null
+    if (!element) return { success: false, message: `Element not found: ${selector}` }
+    const rect = element.getBoundingClientRect()
+    const opts = {
+      bubbles: true,
+      cancelable: true,
+      clientX: rect.x + rect.width / 2,
+      clientY: rect.y + rect.height / 2,
+    }
+    element.dispatchEvent(new MouseEvent('mouseover', opts))
+    element.dispatchEvent(new MouseEvent('mouseenter', opts))
+    element.dispatchEvent(new MouseEvent('mousemove', opts))
+    return { success: true, message: `Hovered element (fallback): ${selector}` }
+  } catch (error) {
+    return {
+      success: false,
+      message: `Error hovering element: ${error instanceof Error ? error.message : String(error)}`,
+    }
+  }
+}
+
+function focusElement(selector: string): GenericActionResult {
+  try {
+    const element = document.querySelector(selector) as HTMLElement | null
+    if (!element) return { success: false, message: `Element not found: ${selector}` }
+    if (typeof element.focus !== 'function') {
+      return { success: false, message: `Element is not focusable: ${selector}` }
+    }
+    element.focus()
+    element.scrollIntoView({ block: 'nearest' })
+    return { success: true, message: `Focused element (fallback): ${selector}` }
+  } catch (error) {
+    return {
+      success: false,
+      message: `Error focusing element: ${error instanceof Error ? error.message : String(error)}`,
+    }
+  }
+}
+
+function blurElement(selector?: string): GenericActionResult {
+  try {
+    const element = selector
+      ? (document.querySelector(selector) as HTMLElement | null)
+      : (document.activeElement as HTMLElement | null)
+    if (!element) {
+      return {
+        success: false,
+        message: selector ? `Element not found: ${selector}` : 'No active element to blur',
+      }
+    }
+    if (typeof element.blur !== 'function') {
+      return { success: false, message: `Element cannot blur: ${selector ?? 'activeElement'}` }
+    }
+    element.blur()
+    return {
+      success: true,
+      message: `Blurred (fallback): ${selector ?? 'activeElement'}`,
+    }
+  } catch (error) {
+    return {
+      success: false,
+      message: `Error blurring element: ${error instanceof Error ? error.message : String(error)}`,
+    }
+  }
+}
+
+function scrollIntoView(
+  selector: string,
+  behavior?: 'auto' | 'smooth',
+  block?: 'start' | 'center' | 'end' | 'nearest'
+): GenericActionResult {
+  try {
+    const element = document.querySelector(selector) as HTMLElement | null
+    if (!element) return { success: false, message: `Element not found: ${selector}` }
+    element.scrollIntoView({ behavior: behavior ?? 'auto', block: block ?? 'nearest' })
+    return { success: true, message: `Scrolled (fallback): ${selector}` }
+  } catch (error) {
+    return {
+      success: false,
+      message: `Error scrolling element: ${error instanceof Error ? error.message : String(error)}`,
     }
   }
 }
@@ -740,6 +831,44 @@ chrome.runtime.onMessage.addListener(
       } else {
         sendResponse({ success: false, error: result.error || 'Unknown error' })
       }
+      return true
+    }
+
+    if (request.action === 'HOVER_ELEMENT') {
+      const r = hoverElement(request.selector)
+      sendResponse(r.success ? { success: true, data: r } : { success: false, error: r.message })
+      return true
+    }
+
+    if (request.action === 'FOCUS_ELEMENT') {
+      const r = focusElement(request.selector)
+      sendResponse(r.success ? { success: true, data: r } : { success: false, error: r.message })
+      return true
+    }
+
+    if (request.action === 'BLUR_ELEMENT') {
+      const r = blurElement(request.selector)
+      sendResponse(r.success ? { success: true, data: r } : { success: false, error: r.message })
+      return true
+    }
+
+    if (request.action === 'SCROLL_INTO_VIEW') {
+      const r = scrollIntoView(request.selector, request.behavior, request.block)
+      sendResponse(r.success ? { success: true, data: r } : { success: false, error: r.message })
+      return true
+    }
+
+    if (
+      request.action === 'RIGHT_CLICK_ELEMENT' ||
+      request.action === 'DOUBLE_CLICK_ELEMENT' ||
+      request.action === 'SELECT_TEXT' ||
+      request.action === 'PRESS_KEY' ||
+      request.action === 'PRESS_KEY_COMBINATION'
+    ) {
+      sendResponse({
+        success: false,
+        error: `Action ${request.action} requires CDP; content-script fallback is not supported.`,
+      })
       return true
     }
 

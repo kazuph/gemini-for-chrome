@@ -1,14 +1,24 @@
 import { useState, useRef, useEffect } from 'react'
-import { Send, FileText, Loader2 } from 'lucide-react'
+import { Send, FileText, Square, MousePointer2 } from 'lucide-react'
 import { cn } from '../lib/utils'
 
 interface ChatInputProps {
   onSend: (message: string, includePageContent: boolean) => void
+  onStop?: () => void
   isLoading: boolean
   theme?: 'light' | 'dark'
+  browserActionMode: boolean
+  onToggleBrowserActionMode: () => void
 }
 
-export default function ChatInput({ onSend, isLoading, theme = 'dark' }: ChatInputProps) {
+export default function ChatInput({
+  onSend,
+  onStop,
+  isLoading,
+  theme = 'dark',
+  browserActionMode,
+  onToggleBrowserActionMode,
+}: ChatInputProps) {
   const [message, setMessage] = useState('')
   const [includePageContent, setIncludePageContent] = useState(true)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
@@ -35,17 +45,41 @@ export default function ChatInput({ onSend, isLoading, theme = 'dark' }: ChatInp
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault()
+    if (isLoading) {
+      // 送信ボタンはローディング中はStop動作のみ（submit経由でも安全に誘導）
+      onStop?.()
+      return
+    }
     const trimmedMessage = message.trim()
-    if (trimmedMessage && !isLoading) {
+    if (trimmedMessage) {
       onSend(trimmedMessage, includePageContent)
       setMessage('')
     }
   }
 
+  const hasNewline = message.includes('\n')
+
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
-    // Submit on Cmd+Enter (Mac) or Ctrl+Enter (Windows/Linux)
-    // Also check isComposing to avoid interfering with IME input
-    if (e.key === 'Enter' && (e.metaKey || e.ctrlKey) && !e.nativeEvent.isComposing) {
+    if (e.key !== 'Enter') return
+    // IME変換中は常に送信しない
+    if (e.nativeEvent.isComposing) return
+
+    const withModifier = e.metaKey || e.ctrlKey
+
+    if (withModifier) {
+      // ⌘/Ctrl+Enter は常に送信
+      e.preventDefault()
+      handleSubmit(e)
+      return
+    }
+
+    if (e.shiftKey) {
+      // Shift+Enter は常に改行挿入 (デフォルト挙動)
+      return
+    }
+
+    // 素のEnter: 改行が無いなら送信、改行があるなら改行挿入 (デフォルト)
+    if (!hasNewline) {
       e.preventDefault()
       handleSubmit(e)
     }
@@ -53,16 +87,31 @@ export default function ChatInput({ onSend, isLoading, theme = 'dark' }: ChatInp
 
   return (
     <form onSubmit={handleSubmit} className={cn('border-t p-4', colors.bg, colors.border)}>
-      {/* Page content toggle - always enabled, fetches on send */}
-      <div className="flex items-center gap-2 mb-3">
+      {/* Mode pills - browser actions + page content */}
+      <div className="flex items-center gap-2 mb-3 flex-wrap">
+        <button
+          type="button"
+          onClick={onToggleBrowserActionMode}
+          className={cn(
+            'flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium transition-colors',
+            browserActionMode ? colors.toggleActive : colors.toggleInactive
+          )}
+          title={
+            browserActionMode
+              ? 'Browser actions enabled (model can click / fill / press keys)'
+              : 'Browser actions disabled (chat only)'
+          }
+        >
+          <MousePointer2 className="w-3.5 h-3.5" />
+          {browserActionMode ? 'Actions on' : 'Actions off'}
+        </button>
+
         <button
           type="button"
           onClick={() => setIncludePageContent(!includePageContent)}
           className={cn(
             'flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium transition-colors',
-            includePageContent
-              ? colors.toggleActive
-              : colors.toggleInactive
+            includePageContent ? colors.toggleActive : colors.toggleInactive
           )}
         >
           <FileText className="w-3.5 h-3.5" />
@@ -98,28 +147,41 @@ export default function ChatInput({ onSend, isLoading, theme = 'dark' }: ChatInp
           />
         </div>
 
-        {/* Send button */}
-        <button
-          type="submit"
-          disabled={!message.trim() || isLoading}
-          className={cn(
-            'flex-shrink-0 p-3 rounded-xl transition-colors',
-            'bg-blue-600 text-white',
-            'hover:bg-blue-500',
-            'disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:bg-blue-600'
-          )}
-        >
-          {isLoading ? (
-            <Loader2 className="w-5 h-5 animate-spin" />
-          ) : (
+        {/* Send / Stop button */}
+        {isLoading ? (
+          <button
+            type="button"
+            onClick={onStop}
+            className={cn(
+              'flex-shrink-0 p-3 rounded-xl transition-colors',
+              'bg-red-600 text-white hover:bg-red-500'
+            )}
+            title="Stop generation"
+          >
+            <Square className="w-5 h-5" fill="currentColor" />
+          </button>
+        ) : (
+          <button
+            type="submit"
+            disabled={!message.trim()}
+            className={cn(
+              'flex-shrink-0 p-3 rounded-xl transition-colors',
+              'bg-blue-600 text-white',
+              'hover:bg-blue-500',
+              'disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:bg-blue-600'
+            )}
+            title="Send message"
+          >
             <Send className="w-5 h-5" />
-          )}
-        </button>
+          </button>
+        )}
       </div>
 
       {/* Help text */}
       <p className={cn('mt-2 text-xs text-center', colors.textSecondary)}>
-        ⌘+Enter / Ctrl+Enter to send
+        {hasNewline
+          ? '⌘+Enter / Ctrl+Enter to send · Enter for new line'
+          : 'Enter to send · Shift+Enter for new line'}
       </p>
     </form>
   )
