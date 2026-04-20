@@ -11,7 +11,30 @@ interface KeyInfo {
 interface RuntimeEvaluateResult {
   result?: {
     value?: unknown
+    type?: string
+    subtype?: string
+    description?: string
   }
+  exceptionDetails?: {
+    text?: string
+    exception?: {
+      description?: string
+      value?: unknown
+    }
+    lineNumber?: number
+    columnNumber?: number
+  }
+}
+
+export interface RunJsOutcome {
+  success: boolean
+  value?: unknown
+  valuePreview?: string
+  valueByteSize?: number
+  type?: string
+  truncated?: boolean
+  error?: string
+  durationMs: number
 }
 
 interface ElementRect {
@@ -31,6 +54,46 @@ export interface NativeScrollOptions {
   behavior?: 'auto' | 'smooth'
   block?: 'start' | 'center' | 'end' | 'nearest'
 }
+
+export interface ScrollPosition {
+  x: number
+  y: number
+  maxX: number
+  maxY: number
+}
+
+export interface ScrollToBottomInfo extends ScrollPosition {
+  scrollHeight: number
+  iterations: number
+}
+
+export interface FoundElementInfoRaw {
+  index: number
+  text: string
+  visible: boolean
+  rect: { x: number; y: number; width: number; height: number }
+  tagName: string
+  href?: string
+  ariaLabel?: string
+}
+
+export interface LinkInfoRaw {
+  text: string
+  href: string
+  title?: string
+  ariaLabel?: string
+}
+
+// Shared visibility predicate injected into page-side evaluation.
+// Mirrors the logic used by getElementCoordinates so behavior stays consistent.
+const VISIBILITY_HELPER_JS = `
+  const __isVisible = (el) => {
+    if (!el || !(el instanceof Element)) return false;
+    if (el.offsetParent === null && getComputedStyle(el).position !== 'fixed') return false;
+    const rr = el.getBoundingClientRect();
+    return rr.width > 0 && rr.height > 0;
+  };
+`
 
 const CDP_VERSION = '1.3'
 const DOUBLE_CLICK_DELAY_MS = 100
@@ -379,10 +442,26 @@ export class NativeInputHandler {
     }
   }
 
-  async press(tabId: number, key: string): Promise<void> {
+  async press(tabId: number, key: string, selector?: string): Promise<void> {
     try {
       await this.attachDebugger(tabId)
       const keyInfo = this.getKeyInfo(key)
+
+      // fill_element detaches the debugger on completion which drops focus;
+      // re-focus here if the caller points at the intended target (otherwise
+      // keys land on <body> and form submission silently no-ops).
+      if (selector) {
+        await this.cdpSend(tabId, 'Runtime.evaluate', {
+          expression: `
+            (() => {
+              const el = document.querySelector(${JSON.stringify(selector)});
+              if (el && typeof el.focus === 'function') { el.focus(); return true; }
+              return false;
+            })()
+          `,
+          returnByValue: true,
+        })
+      }
 
       if (this.isModifierKey(key)) this.updateModifierState(key, true)
       await this.dispatchKey(tabId, keyInfo, true)
@@ -452,6 +531,416 @@ export class NativeInputHandler {
     } finally {
       await this.detachDebugger(tabId)
     }
+  }
+
+  async waitForElement(tabId: number, selector: string, timeoutMs = 5000): Promise<number> {
+    const cappedTimeout = Math.max(0, Math.min(timeoutMs, 60_000))
+    const pollIntervalMs = 200
+    const startedAt = Date.now()
+    const deadline = startedAt + cappedTimeout
+
+    try {
+      await this.attachDebugger(tabId)
+
+      while (true) {
+        const result = (await this.cdpSend(tabId, 'Runtime.evaluate', {
+          expression: `
+            (() => {
+              ${VISIBILITY_HELPER_JS}
+              const nodes = document.querySelectorAll(${JSON.stringify(selector)});
+              for (const el of nodes) {
+                if (__isVisible(el)) return true;
+              }
+              return false;
+            })()
+          `,
+          returnByValue: true,
+        })) as RuntimeEvaluateResult
+
+        if (result.result?.value === true) {
+          return Date.now() - startedAt
+        }
+
+        if (Date.now() >= deadline) {
+          throw new Error(
+            `Timeout waiting for visible element after ${cappedTimeout}ms: ${selector}`
+          )
+        }
+
+        await this.sleep(pollIntervalMs)
+      }
+    } finally {
+      await this.detachDebugger(tabId)
+    }
+  }
+
+  async scrollBy(tabId: number, dx: number, dy: number): Promise<ScrollPosition> {
+    try {
+      await this.attachDebugger(tabId)
+
+      const centerX = 100
+      const centerY = 100
+
+      await this.cdpSend(tabId, 'Input.dispatchMouseEvent', {
+        type: 'mouseWheel',
+        x: centerX,
+        y: centerY,
+        deltaX: dx,
+        deltaY: dy,
+      })
+
+      return await this.getScrollPositionInternal(tabId)
+    } finally {
+      await this.detachDebugger(tabId)
+    }
+  }
+
+  async scrollToBottom(tabId: number, behavior: 'auto' | 'smooth' = 'auto'): Promise<ScrollToBottomInfo> {
+    try {
+      await this.attachDebugger(tabId)
+
+      const behaviorJson = JSON.stringify(behavior)
+      let lastHeight = -1
+      let iterations = 0
+      const maxIterations = 3
+
+      for (let i = 0; i < maxIterations; i++) {
+        iterations = i + 1
+        const result = (await this.cdpSend(tabId, 'Runtime.evaluate', {
+          expression: `
+            (() => {
+              window.scrollTo({ top: document.body.scrollHeight, left: 0, behavior: ${behaviorJson} });
+              return document.body.scrollHeight;
+            })()
+          `,
+          returnByValue: true,
+        })) as RuntimeEvaluateResult
+
+        const height = typeof result.result?.value === 'number' ? (result.result.value as number) : 0
+
+        await this.sleep(500)
+
+        if (height === lastHeight) break
+        lastHeight = height
+      }
+
+      const pos = await this.getScrollPositionInternal(tabId)
+      const heightResult = (await this.cdpSend(tabId, 'Runtime.evaluate', {
+        expression: 'document.body.scrollHeight',
+        returnByValue: true,
+      })) as RuntimeEvaluateResult
+      const scrollHeight =
+        typeof heightResult.result?.value === 'number' ? (heightResult.result.value as number) : 0
+
+      return { ...pos, scrollHeight, iterations }
+    } finally {
+      await this.detachDebugger(tabId)
+    }
+  }
+
+  async scrollToTop(tabId: number, behavior: 'auto' | 'smooth' = 'auto'): Promise<ScrollPosition> {
+    try {
+      await this.attachDebugger(tabId)
+      const behaviorJson = JSON.stringify(behavior)
+
+      await this.cdpSend(tabId, 'Runtime.evaluate', {
+        expression: `window.scrollTo({ top: 0, left: 0, behavior: ${behaviorJson} })`,
+      })
+
+      return await this.getScrollPositionInternal(tabId)
+    } finally {
+      await this.detachDebugger(tabId)
+    }
+  }
+
+  async getScrollPosition(tabId: number): Promise<ScrollPosition> {
+    try {
+      await this.attachDebugger(tabId)
+      return await this.getScrollPositionInternal(tabId)
+    } finally {
+      await this.detachDebugger(tabId)
+    }
+  }
+
+  async getText(tabId: number, selector: string): Promise<string> {
+    try {
+      await this.attachDebugger(tabId)
+
+      const result = (await this.cdpSend(tabId, 'Runtime.evaluate', {
+        expression: `
+          (() => {
+            ${VISIBILITY_HELPER_JS}
+            const nodes = document.querySelectorAll(${JSON.stringify(selector)});
+            for (const el of nodes) {
+              if (__isVisible(el)) {
+                const text = (el.textContent || '').trim();
+                return { found: true, text: text.slice(0, 5000) };
+              }
+            }
+            return { found: false, count: nodes.length };
+          })()
+        `,
+        returnByValue: true,
+      })) as RuntimeEvaluateResult
+
+      const value = result.result?.value as
+        | { found: true; text: string }
+        | { found: false; count: number }
+        | undefined
+
+      if (!value) throw new Error(`Failed to evaluate: ${selector}`)
+      if (!value.found) {
+        throw new Error(
+          `No visible element found for selector: ${selector} (matched ${value.count} node(s))`
+        )
+      }
+      return value.text
+    } finally {
+      await this.detachDebugger(tabId)
+    }
+  }
+
+  async getAttribute(tabId: number, selector: string, name: string): Promise<string | null> {
+    try {
+      await this.attachDebugger(tabId)
+
+      const result = (await this.cdpSend(tabId, 'Runtime.evaluate', {
+        expression: `
+          (() => {
+            ${VISIBILITY_HELPER_JS}
+            const nodes = document.querySelectorAll(${JSON.stringify(selector)});
+            for (const el of nodes) {
+              if (__isVisible(el)) {
+                const v = el.getAttribute(${JSON.stringify(name)});
+                return { found: true, value: v };
+              }
+            }
+            return { found: false, count: nodes.length };
+          })()
+        `,
+        returnByValue: true,
+      })) as RuntimeEvaluateResult
+
+      const value = result.result?.value as
+        | { found: true; value: string | null }
+        | { found: false; count: number }
+        | undefined
+
+      if (!value) throw new Error(`Failed to evaluate: ${selector}`)
+      if (!value.found) {
+        throw new Error(
+          `No visible element found for selector: ${selector} (matched ${value.count} node(s))`
+        )
+      }
+      return value.value
+    } finally {
+      await this.detachDebugger(tabId)
+    }
+  }
+
+  async findElements(
+    tabId: number,
+    selector: string,
+    limit = 20
+  ): Promise<FoundElementInfoRaw[]> {
+    try {
+      await this.attachDebugger(tabId)
+      const cappedLimit = Math.max(1, Math.min(limit, 200))
+
+      const result = (await this.cdpSend(tabId, 'Runtime.evaluate', {
+        expression: `
+          (() => {
+            ${VISIBILITY_HELPER_JS}
+            const nodes = Array.from(document.querySelectorAll(${JSON.stringify(selector)}));
+            const limited = nodes.slice(0, ${cappedLimit});
+            return limited.map((el, index) => {
+              const r = el.getBoundingClientRect();
+              const text = (el.textContent || '').trim().slice(0, 200);
+              const info = {
+                index,
+                text,
+                visible: __isVisible(el),
+                rect: { x: r.x, y: r.y, width: r.width, height: r.height },
+                tagName: el.tagName.toLowerCase(),
+              };
+              const href = el.getAttribute('href');
+              if (href) info.href = href;
+              const aria = el.getAttribute('aria-label');
+              if (aria) info.ariaLabel = aria;
+              return info;
+            });
+          })()
+        `,
+        returnByValue: true,
+      })) as RuntimeEvaluateResult
+
+      const value = result.result?.value
+      if (!Array.isArray(value)) return []
+      return value as FoundElementInfoRaw[]
+    } finally {
+      await this.detachDebugger(tabId)
+    }
+  }
+
+  async getAllLinks(tabId: number, filterSelector?: string): Promise<LinkInfoRaw[]> {
+    try {
+      await this.attachDebugger(tabId)
+      const sel = filterSelector ?? 'a'
+
+      const result = (await this.cdpSend(tabId, 'Runtime.evaluate', {
+        expression: `
+          (() => {
+            ${VISIBILITY_HELPER_JS}
+            const nodes = Array.from(document.querySelectorAll(${JSON.stringify(sel)}));
+            const links = [];
+            for (const el of nodes) {
+              if (!__isVisible(el)) continue;
+              const href = (el.getAttribute('href') || el.href || '').toString();
+              if (!href) continue;
+              const text = (el.textContent || '').trim().slice(0, 200);
+              const link = { text, href };
+              const title = el.getAttribute('title');
+              if (title) link.title = title;
+              const aria = el.getAttribute('aria-label');
+              if (aria) link.ariaLabel = aria;
+              links.push(link);
+              if (links.length >= 50) break;
+            }
+            return links;
+          })()
+        `,
+        returnByValue: true,
+      })) as RuntimeEvaluateResult
+
+      const value = result.result?.value
+      if (!Array.isArray(value)) return []
+      return value as LinkInfoRaw[]
+    } finally {
+      await this.detachDebugger(tabId)
+    }
+  }
+
+  async wait(ms: number): Promise<number> {
+    const capped = Math.max(0, Math.min(ms, 10_000))
+    await this.sleep(capped)
+    return capped
+  }
+
+  /**
+   * Run arbitrary JS in the active tab via CDP Runtime.evaluate.
+   * Code is wrapped in an async IIFE so `return` and top-level `await` both
+   * work. The result is returned by value (JSON-serialized through CDP) and
+   * any thrown exception is surfaced in `error`. The serialized value is
+   * capped at 100KB; when over that the preview is truncated and the
+   * `truncated` flag is set. A dual timeout (CDP-side + JS-side) protects
+   * against runaway scripts.
+   */
+  async runJs(tabId: number, code: string, timeoutMs = 10_000): Promise<RunJsOutcome> {
+    const cappedTimeout = Math.max(100, Math.min(timeoutMs, 30_000))
+    const MAX_BYTES = 100 * 1024
+    const startedAt = Date.now()
+    try {
+      await this.attachDebugger(tabId)
+      const wrappedCode = `(async () => { ${code}\n})()`
+
+      const evalPromise = this.cdpSend(tabId, 'Runtime.evaluate', {
+        expression: wrappedCode,
+        returnByValue: true,
+        awaitPromise: true,
+        timeout: cappedTimeout,
+        userGesture: true,
+      }) as Promise<RuntimeEvaluateResult>
+
+      // Extra JS-side guard: CDP `timeout` should be honored by the browser,
+      // but we add a small buffer (+500ms) setTimeout so a misbehaving CDP
+      // evaluation cannot stall the extension indefinitely.
+      const guardPromise = new Promise<never>((_, reject) => {
+        setTimeout(() => {
+          reject(new Error(`run_js timed out after ${cappedTimeout}ms`))
+        }, cappedTimeout + 500)
+      })
+
+      const result = (await Promise.race([evalPromise, guardPromise])) as RuntimeEvaluateResult
+
+      if (result.exceptionDetails) {
+        const ex = result.exceptionDetails
+        const errText =
+          ex.exception?.description ??
+          (typeof ex.exception?.value === 'string' ? ex.exception.value : undefined) ??
+          ex.text ??
+          'Unknown JavaScript exception'
+        return {
+          success: false,
+          error: errText,
+          durationMs: Date.now() - startedAt,
+        }
+      }
+
+      const rawValue = result.result?.value
+      const type =
+        result.result?.subtype ??
+        result.result?.type ??
+        (rawValue === null ? 'null' : typeof rawValue)
+
+      // Serialize defensively: try JSON.stringify with a two-arg fallback for
+      // circular structures / functions / symbols. If everything fails, use
+      // String(v) so the model still sees something.
+      let serialized: string
+      try {
+        serialized = JSON.stringify(rawValue, null, 2) ?? 'undefined'
+      } catch {
+        try {
+          serialized = String(rawValue)
+        } catch {
+          serialized = '<unserializable>'
+        }
+      }
+
+      const byteSize = serialized.length
+      const truncated = byteSize > MAX_BYTES
+      const bodyForPreview = truncated ? serialized.slice(0, MAX_BYTES) : serialized
+      const valuePreview = bodyForPreview.slice(0, 200)
+
+      // When truncated, drop the full value to avoid blowing the tool-result
+      // payload — keep only the preview + size info.
+      const returnValue = truncated ? undefined : rawValue
+
+      return {
+        success: true,
+        value: returnValue,
+        valuePreview,
+        valueByteSize: byteSize,
+        type,
+        truncated,
+        durationMs: Date.now() - startedAt,
+      }
+    } catch (err) {
+      return {
+        success: false,
+        error: err instanceof Error ? err.message : String(err),
+        durationMs: Date.now() - startedAt,
+      }
+    } finally {
+      await this.detachDebugger(tabId)
+    }
+  }
+
+  private async getScrollPositionInternal(tabId: number): Promise<ScrollPosition> {
+    const result = (await this.cdpSend(tabId, 'Runtime.evaluate', {
+      expression: `
+        (() => ({
+          x: window.scrollX,
+          y: window.scrollY,
+          maxX: Math.max(0, document.documentElement.scrollWidth - window.innerWidth),
+          maxY: Math.max(0, document.documentElement.scrollHeight - window.innerHeight),
+        }))()
+      `,
+      returnByValue: true,
+    })) as RuntimeEvaluateResult
+
+    const value = result.result?.value as ScrollPosition | undefined
+    if (!value) throw new Error('Failed to read scroll position')
+    return value
   }
 
   private async attachDebugger(tabId: number): Promise<void> {

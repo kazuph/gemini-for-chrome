@@ -84,6 +84,10 @@ export default function MarkdownRenderer({ content, className, theme = 'dark', f
     [&_blockquote]:text-gray-400
     [&_a]:text-blue-400
     [&_hr]:border-gray-700
+    [&_table]:border-gray-600
+    [&_th]:bg-gray-800 [&_th]:border-gray-600
+    [&_td]:border-gray-700
+    [&_tbody_tr:nth-child(even)]:bg-gray-900/40
   ` : `
     [&_pre]:bg-gray-100
     [&_code]:bg-gray-200
@@ -91,6 +95,10 @@ export default function MarkdownRenderer({ content, className, theme = 'dark', f
     [&_blockquote]:text-gray-600
     [&_a]:text-blue-600
     [&_hr]:border-gray-300
+    [&_table]:border-gray-300
+    [&_th]:bg-gray-100 [&_th]:border-gray-300
+    [&_td]:border-gray-200
+    [&_tbody_tr:nth-child(even)]:bg-gray-50
   `
 
   const baseMarkdownStyles = cn(
@@ -110,6 +118,12 @@ export default function MarkdownRenderer({ content, className, theme = 'dark', f
     '[&_h4]:text-base [&_h4]:font-semibold [&_h4]:mt-4 [&_h4]:mb-2',
     '[&_p]:my-2',
     '[&_hr]:my-4',
+    // Table styles — proper borders / header contrast / zebra rows so GFM
+    // tables render as actual tables instead of visually-merged text columns.
+    '[&_table]:w-full [&_table]:my-3 [&_table]:border-collapse [&_table]:border [&_table]:text-sm [&_table]:block [&_table]:overflow-x-auto',
+    '[&_thead]:text-left',
+    '[&_th]:px-3 [&_th]:py-2 [&_th]:border [&_th]:font-semibold [&_th]:text-left',
+    '[&_td]:px-3 [&_td]:py-2 [&_td]:border [&_td]:align-top',
     themeStyles
   )
 

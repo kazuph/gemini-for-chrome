@@ -9,6 +9,8 @@ interface ChatInputProps {
   theme?: 'light' | 'dark'
   browserActionMode: boolean
   onToggleBrowserActionMode: () => void
+  /** Past user messages in chronological (oldest→newest) order. */
+  userMessageHistory?: string[]
 }
 
 export default function ChatInput({
@@ -18,10 +20,18 @@ export default function ChatInput({
   theme = 'dark',
   browserActionMode,
   onToggleBrowserActionMode,
+  userMessageHistory = [],
 }: ChatInputProps) {
   const [message, setMessage] = useState('')
   const [includePageContent, setIncludePageContent] = useState(true)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
+
+  // History scrubbing state: historyIndex = 0 shows the most recent past
+  // message, 1 is the one before, etc. null means "not in history mode".
+  const [historyIndex, setHistoryIndex] = useState<number | null>(null)
+  // Draft the user had typed before entering history mode — restored when they
+  // scrub back past the newest entry.
+  const savedDraftRef = useRef<string>('')
 
   const colors = {
     bg: theme === 'dark' ? 'bg-gray-800' : 'bg-white',
@@ -34,12 +44,17 @@ export default function ChatInput({
     toggleInactive: theme === 'dark' ? 'bg-gray-700 text-gray-400 hover:bg-gray-600' : 'bg-gray-200 text-gray-600 hover:bg-gray-300',
   }
 
-  // Auto-resize textarea
+  // Auto-resize textarea. Clamp to MIN so a single-line textarea stays the
+  // same height as the send/stop button (which is a 46px square), otherwise
+  // items-end would float the textarea a few pixels above the button.
   useEffect(() => {
     const textarea = textareaRef.current
     if (textarea) {
       textarea.style.height = 'auto'
-      textarea.style.height = `${Math.min(textarea.scrollHeight, 200)}px`
+      const MIN = 46
+      const MAX = 200
+      const next = Math.min(Math.max(textarea.scrollHeight, MIN), MAX)
+      textarea.style.height = `${next}px`
     }
   }, [message])
 
@@ -54,12 +69,63 @@ export default function ChatInput({
     if (trimmedMessage) {
       onSend(trimmedMessage, includePageContent)
       setMessage('')
+      setHistoryIndex(null)
+      savedDraftRef.current = ''
     }
   }
 
   const hasNewline = message.includes('\n')
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    const textarea = e.currentTarget
+
+    // History scrubbing via ArrowUp / ArrowDown — only triggers when the caret
+    // is at the edge of the textarea so normal line-wise navigation in
+    // multi-line drafts is preserved.
+    if (
+      (e.key === 'ArrowUp' || e.key === 'ArrowDown') &&
+      !e.nativeEvent.isComposing &&
+      !e.metaKey && !e.ctrlKey && !e.altKey && !e.shiftKey
+    ) {
+      const value = textarea.value
+      const caret = textarea.selectionStart
+      const firstNewline = value.indexOf('\n')
+      const caretOnFirstLine = firstNewline === -1 || caret <= firstNewline
+      const lastNewline = value.lastIndexOf('\n')
+      const caretOnLastLine = lastNewline === -1 || caret > lastNewline
+
+      if (e.key === 'ArrowUp' && caretOnFirstLine && userMessageHistory.length > 0) {
+        e.preventDefault()
+        if (historyIndex === null) {
+          savedDraftRef.current = value
+          const newest = userMessageHistory.length - 1
+          setHistoryIndex(0)
+          setMessage(userMessageHistory[newest])
+        } else if (historyIndex + 1 < userMessageHistory.length) {
+          const next = historyIndex + 1
+          const idx = userMessageHistory.length - 1 - next
+          setHistoryIndex(next)
+          setMessage(userMessageHistory[idx])
+        }
+        return
+      }
+
+      if (e.key === 'ArrowDown' && caretOnLastLine && historyIndex !== null) {
+        e.preventDefault()
+        if (historyIndex === 0) {
+          setHistoryIndex(null)
+          setMessage(savedDraftRef.current)
+          savedDraftRef.current = ''
+        } else {
+          const next = historyIndex - 1
+          const idx = userMessageHistory.length - 1 - next
+          setHistoryIndex(next)
+          setMessage(userMessageHistory[idx])
+        }
+        return
+      }
+    }
+
     if (e.key !== 'Enter') return
     // IME変換中は常に送信しない
     if (e.nativeEvent.isComposing) return
@@ -82,6 +148,15 @@ export default function ChatInput({
     if (!hasNewline) {
       e.preventDefault()
       handleSubmit(e)
+    }
+  }
+
+  // Any direct edit exits history mode so the user can keep typing freely.
+  const handleChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
+    setMessage(e.target.value)
+    if (historyIndex !== null) {
+      setHistoryIndex(null)
+      savedDraftRef.current = ''
     }
   }
 
@@ -130,13 +205,17 @@ export default function ChatInput({
           <textarea
             ref={textareaRef}
             value={message}
-            onChange={(e) => setMessage(e.target.value)}
+            onChange={handleChange}
             onKeyDown={handleKeyDown}
             placeholder="Ask about this page or anything else..."
             disabled={isLoading}
             rows={1}
+            // Inline style for height-matching the send button — avoids
+            // Tailwind JIT issues with arbitrary `h-[46px]` values being
+            // dropped in some build setups.
+            style={{ minHeight: 46 }}
             className={cn(
-              'w-full px-4 py-3 rounded-xl border',
+              'w-full px-4 py-3 rounded-xl border box-border block',
               colors.input,
               colors.text,
               colors.placeholder,
@@ -152,8 +231,9 @@ export default function ChatInput({
           <button
             type="button"
             onClick={onStop}
+            style={{ height: 46, width: 46 }}
             className={cn(
-              'flex-shrink-0 p-3 rounded-xl transition-colors',
+              'flex-shrink-0 flex items-center justify-center rounded-xl transition-colors box-border',
               'bg-red-600 text-white hover:bg-red-500'
             )}
             title="Stop generation"
@@ -164,8 +244,9 @@ export default function ChatInput({
           <button
             type="submit"
             disabled={!message.trim()}
+            style={{ height: 46, width: 46 }}
             className={cn(
-              'flex-shrink-0 p-3 rounded-xl transition-colors',
+              'flex-shrink-0 flex items-center justify-center rounded-xl transition-colors box-border',
               'bg-blue-600 text-white',
               'hover:bg-blue-500',
               'disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:bg-blue-600'

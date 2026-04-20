@@ -8,6 +8,14 @@ import type {
   FillElementResult,
   GetHtmlResult,
   GenericActionResult,
+  ScrollPositionResult,
+  ScrollToBottomResult,
+  GetTextResult,
+  GetAttributeResult,
+  FindElementsResult,
+  FoundElementInfo,
+  GetAllLinksResult,
+  LinkInfo,
 } from '../types'
 
 console.log('Gemini Side Panel: Content script loaded')
@@ -374,6 +382,192 @@ function getHtml(selector?: string): GetHtmlResult {
       error: `Error getting HTML: ${error instanceof Error ? error.message : String(error)}`,
     }
   }
+}
+
+function isVisibleElement(el: Element | null): el is HTMLElement {
+  if (!el || !(el instanceof HTMLElement)) return false
+  if (el.offsetParent === null && getComputedStyle(el).position !== 'fixed') return false
+  const r = el.getBoundingClientRect()
+  return r.width > 0 && r.height > 0
+}
+
+function scrollByFallback(dx: number, dy: number): ScrollPositionResult {
+  try {
+    window.scrollBy(dx, dy)
+    return {
+      success: true,
+      message: `Scrolled by (${dx}, ${dy}) [fallback]`,
+      x: window.scrollX,
+      y: window.scrollY,
+      maxX: Math.max(0, document.documentElement.scrollWidth - window.innerWidth),
+      maxY: Math.max(0, document.documentElement.scrollHeight - window.innerHeight),
+    }
+  } catch (error) {
+    return {
+      success: false,
+      error: error instanceof Error ? error.message : String(error),
+    }
+  }
+}
+
+function scrollToBottomFallback(behavior: 'auto' | 'smooth' = 'auto'): ScrollToBottomResult {
+  try {
+    let lastHeight = -1
+    let iterations = 0
+    for (let i = 0; i < 3; i++) {
+      iterations = i + 1
+      const height = document.body.scrollHeight
+      window.scrollTo({ top: height, left: 0, behavior })
+      if (height === lastHeight) break
+      lastHeight = height
+    }
+    return {
+      success: true,
+      message: `Scrolled to bottom [fallback, iterations=${iterations}]`,
+      x: window.scrollX,
+      y: window.scrollY,
+      maxX: Math.max(0, document.documentElement.scrollWidth - window.innerWidth),
+      maxY: Math.max(0, document.documentElement.scrollHeight - window.innerHeight),
+      scrollHeight: document.body.scrollHeight,
+      iterations,
+    }
+  } catch (error) {
+    return {
+      success: false,
+      error: error instanceof Error ? error.message : String(error),
+    }
+  }
+}
+
+function scrollToTopFallback(behavior: 'auto' | 'smooth' = 'auto'): ScrollPositionResult {
+  try {
+    window.scrollTo({ top: 0, left: 0, behavior })
+    return {
+      success: true,
+      message: 'Scrolled to top [fallback]',
+      x: window.scrollX,
+      y: window.scrollY,
+      maxX: Math.max(0, document.documentElement.scrollWidth - window.innerWidth),
+      maxY: Math.max(0, document.documentElement.scrollHeight - window.innerHeight),
+    }
+  } catch (error) {
+    return {
+      success: false,
+      error: error instanceof Error ? error.message : String(error),
+    }
+  }
+}
+
+function getScrollPositionFallback(): ScrollPositionResult {
+  try {
+    return {
+      success: true,
+      message: 'Scroll position read [fallback]',
+      x: window.scrollX,
+      y: window.scrollY,
+      maxX: Math.max(0, document.documentElement.scrollWidth - window.innerWidth),
+      maxY: Math.max(0, document.documentElement.scrollHeight - window.innerHeight),
+    }
+  } catch (error) {
+    return {
+      success: false,
+      error: error instanceof Error ? error.message : String(error),
+    }
+  }
+}
+
+function getTextFallback(selector: string): GetTextResult {
+  try {
+    const nodes = document.querySelectorAll(selector)
+    for (const el of nodes) {
+      if (isVisibleElement(el)) {
+        const text = (el.textContent || '').trim()
+        return { success: true, text: text.slice(0, 5000) }
+      }
+    }
+    return {
+      success: false,
+      error: `No visible element found for selector: ${selector} (matched ${nodes.length})`,
+    }
+  } catch (error) {
+    return { success: false, error: error instanceof Error ? error.message : String(error) }
+  }
+}
+
+function getAttributeFallback(selector: string, name: string): GetAttributeResult {
+  try {
+    const nodes = document.querySelectorAll(selector)
+    for (const el of nodes) {
+      if (isVisibleElement(el)) {
+        return { success: true, name, value: el.getAttribute(name) }
+      }
+    }
+    return {
+      success: false,
+      error: `No visible element found for selector: ${selector} (matched ${nodes.length})`,
+    }
+  } catch (error) {
+    return { success: false, error: error instanceof Error ? error.message : String(error) }
+  }
+}
+
+function findElementsFallback(selector: string, limit: number): FindElementsResult {
+  try {
+    const cappedLimit = Math.max(1, Math.min(limit, 200))
+    const nodes = Array.from(document.querySelectorAll(selector)).slice(0, cappedLimit)
+    const elements: FoundElementInfo[] = nodes.map((el, index) => {
+      const r = el.getBoundingClientRect()
+      const info: FoundElementInfo = {
+        index,
+        text: (el.textContent || '').trim().slice(0, 200),
+        visible: isVisibleElement(el),
+        rect: { x: r.x, y: r.y, width: r.width, height: r.height },
+        tagName: el.tagName.toLowerCase(),
+      }
+      const href = el.getAttribute('href')
+      if (href) info.href = href
+      const aria = el.getAttribute('aria-label')
+      if (aria) info.ariaLabel = aria
+      return info
+    })
+    return { success: true, count: elements.length, elements }
+  } catch (error) {
+    return { success: false, error: error instanceof Error ? error.message : String(error) }
+  }
+}
+
+function getAllLinksFallback(filterSelector?: string): GetAllLinksResult {
+  try {
+    const sel = filterSelector ?? 'a'
+    const nodes = Array.from(document.querySelectorAll(sel))
+    const links: LinkInfo[] = []
+    for (const el of nodes) {
+      if (!isVisibleElement(el)) continue
+      const rawHref = el.getAttribute('href') ?? (el instanceof HTMLAnchorElement ? el.href : '')
+      const href = rawHref?.toString() ?? ''
+      if (!href) continue
+      const link: LinkInfo = {
+        text: (el.textContent || '').trim().slice(0, 200),
+        href,
+      }
+      const title = el.getAttribute('title')
+      if (title) link.title = title
+      const aria = el.getAttribute('aria-label')
+      if (aria) link.ariaLabel = aria
+      links.push(link)
+      if (links.length >= 50) break
+    }
+    return { success: true, count: links.length, links }
+  } catch (error) {
+    return { success: false, error: error instanceof Error ? error.message : String(error) }
+  }
+}
+
+function waitFallback(ms: number): Promise<GenericActionResult> {
+  const capped = Math.max(0, Math.min(ms, 10_000))
+  return new Promise((resolve) => {
+    setTimeout(() => resolve({ success: true, message: `Waited ${capped}ms [fallback]` }), capped)
+  })
 }
 
 // Test bridge for E2E testing (allows Playwright to trigger content script functions)
@@ -761,7 +955,23 @@ chrome.runtime.onMessage.addListener(
   (
     request: MessageAction,
     _sender: chrome.runtime.MessageSender,
-    sendResponse: (response: MessageResponse<PageContent | ClickElementResult | FillElementResult | GetHtmlResult> | { status: string }) => void
+    sendResponse: (
+      response:
+        | MessageResponse<
+            | PageContent
+            | ClickElementResult
+            | FillElementResult
+            | GetHtmlResult
+            | GenericActionResult
+            | ScrollPositionResult
+            | ScrollToBottomResult
+            | GetTextResult
+            | GetAttributeResult
+            | FindElementsResult
+            | GetAllLinksResult
+          >
+        | { status: string }
+    ) => void
   ) => {
     console.log('Gemini Side Panel: Received message', request)
 
@@ -863,11 +1073,83 @@ chrome.runtime.onMessage.addListener(
       request.action === 'DOUBLE_CLICK_ELEMENT' ||
       request.action === 'SELECT_TEXT' ||
       request.action === 'PRESS_KEY' ||
-      request.action === 'PRESS_KEY_COMBINATION'
+      request.action === 'PRESS_KEY_COMBINATION' ||
+      request.action === 'WAIT_FOR_ELEMENT'
     ) {
       sendResponse({
         success: false,
         error: `Action ${request.action} requires CDP; content-script fallback is not supported.`,
+      })
+      return true
+    }
+
+    if (request.action === 'SCROLL_BY') {
+      const r = scrollByFallback(request.dx, request.dy)
+      sendResponse(r.success ? { success: true, data: r } : { success: false, error: r.error || 'Failed' })
+      return true
+    }
+
+    if (request.action === 'SCROLL_TO_BOTTOM') {
+      const r = scrollToBottomFallback(request.behavior)
+      sendResponse(r.success ? { success: true, data: r } : { success: false, error: r.error || 'Failed' })
+      return true
+    }
+
+    if (request.action === 'SCROLL_TO_TOP') {
+      const r = scrollToTopFallback(request.behavior)
+      sendResponse(r.success ? { success: true, data: r } : { success: false, error: r.error || 'Failed' })
+      return true
+    }
+
+    if (request.action === 'GET_SCROLL_POSITION') {
+      const r = getScrollPositionFallback()
+      sendResponse(r.success ? { success: true, data: r } : { success: false, error: r.error || 'Failed' })
+      return true
+    }
+
+    if (request.action === 'GET_TEXT') {
+      const r = getTextFallback(request.selector)
+      sendResponse(r.success ? { success: true, data: r } : { success: false, error: r.error || 'Failed' })
+      return true
+    }
+
+    if (request.action === 'GET_ATTRIBUTE') {
+      const r = getAttributeFallback(request.selector, request.name)
+      sendResponse(r.success ? { success: true, data: r } : { success: false, error: r.error || 'Failed' })
+      return true
+    }
+
+    if (request.action === 'FIND_ELEMENTS') {
+      const r = findElementsFallback(request.selector, request.limit ?? 20)
+      sendResponse(r.success ? { success: true, data: r } : { success: false, error: r.error || 'Failed' })
+      return true
+    }
+
+    if (request.action === 'GET_ALL_LINKS') {
+      const r = getAllLinksFallback(request.filterSelector)
+      sendResponse(r.success ? { success: true, data: r } : { success: false, error: r.error || 'Failed' })
+      return true
+    }
+
+    if (request.action === 'WAIT') {
+      waitFallback(request.ms).then((r) => {
+        sendResponse({ success: true, data: r })
+      })
+      return true
+    }
+
+    if (request.action === 'READ_PAGE') {
+      sendResponse({
+        success: false,
+        error: 'READ_PAGE is handled in background script; content script does not respond to it directly.',
+      })
+      return true
+    }
+
+    if (request.action === 'RUN_JS') {
+      sendResponse({
+        success: false,
+        error: 'RUN_JS requires CDP; content-script fallback is not supported.',
       })
       return true
     }
