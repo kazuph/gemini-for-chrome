@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { Settings, AlertCircle, Plus, Minus } from 'lucide-react'
-import type { FunctionCall } from '@google/generative-ai'
+import type { FunctionCall } from '@google/genai'
 import type { Message, PageContent, MessageResponse, UISettings, ThemeMode, BrowserActionResult, ToolCallLog } from '../types'
 import { DEFAULT_UI_SETTINGS } from '../types'
 import { GeminiChat, loadGeminiConfig, type FunctionCallResult, type GeminiUsage } from '../lib/gemini'
@@ -450,9 +450,10 @@ export default function SidePanel() {
     ): Promise<{ result: FunctionCallResult; log: ToolCallLog }> => {
       const startedAt = Date.now()
       const args = (functionCall.args ?? {}) as Record<string, unknown>
+      const functionName = functionCall.name ?? 'unknown'
 
       const makeLog = (success: boolean, resultSummary: string): ToolCallLog => ({
-        name: functionCall.name,
+        name: functionName,
         args,
         success,
         resultSummary,
@@ -464,7 +465,7 @@ export default function SidePanel() {
         const summary = 'Aborted by user'
         return {
           result: {
-            name: functionCall.name,
+            name: functionName,
             response: { success: false, error: summary },
           },
           log: makeLog(false, summary),
@@ -474,10 +475,10 @@ export default function SidePanel() {
       const browserAction = GeminiChat.functionCallToBrowserAction(functionCall)
 
       if (!browserAction) {
-        const summary = `Unknown function: ${functionCall.name}`
+        const summary = `Unknown function: ${functionName}`
         return {
           result: {
-            name: functionCall.name,
+            name: functionName,
             response: { success: false, error: summary },
           },
           log: makeLog(false, summary),
@@ -498,16 +499,16 @@ export default function SidePanel() {
           })
         })
 
-        console.log(`Browser action ${functionCall.name} result:`, response)
+        console.log(`Browser action ${functionName} result:`, response)
         if (response.success) {
           const data = response.data as unknown as Record<string, unknown>
           const succeeded = data.success !== false
           const rawSummary = succeeded
-            ? summarizeToolResult(functionCall.name, data, args)
+            ? summarizeToolResult(functionName, data, args)
             : `Error: ${(typeof data.error === 'string' ? data.error : undefined) ?? 'Unknown error'}`
           const resultSummary = truncate(rawSummary, 100)
           return {
-            result: { name: functionCall.name, response: response.data },
+            result: { name: functionName, response: response.data },
             log: makeLog(succeeded, resultSummary),
           }
         } else {
@@ -515,20 +516,20 @@ export default function SidePanel() {
           const resultSummary = truncate(rawSummary, 100)
           return {
             result: {
-              name: functionCall.name,
+              name: functionName,
               response: { success: false, error: response.error },
             },
             log: makeLog(false, resultSummary),
           }
         }
       } catch (err) {
-        console.error(`Error executing ${functionCall.name}:`, err)
+        console.error(`Error executing ${functionName}:`, err)
         const msg = err instanceof Error ? err.message : 'Unknown error'
         const rawSummary = `Error: ${msg}`
         const resultSummary = truncate(rawSummary, 100)
         return {
           result: {
-            name: functionCall.name,
+            name: functionName,
             response: { success: false, error: msg },
           },
           log: makeLog(false, resultSummary),
@@ -761,7 +762,7 @@ export default function SidePanel() {
         }
 
         // Expose the currently-running tool names to the UI (small live badge).
-        const runningNames = functionCalls.map((fc) => fc.name)
+        const runningNames = functionCalls.map((fc) => fc.name ?? 'unknown')
         setCurrentToolCalls(runningNames)
 
         // Execute all function calls (pass signal so each can bail early).

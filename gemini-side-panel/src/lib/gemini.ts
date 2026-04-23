@@ -1,11 +1,12 @@
 import {
-  GoogleGenerativeAI,
-  SchemaType,
-  FunctionCallingMode,
-  type GenerativeModel,
+  GoogleGenAI,
+  Type,
+  FunctionCallingConfigMode,
   type FunctionDeclaration,
   type FunctionCall,
-} from '@google/generative-ai'
+  type GenerateContentResponse,
+  type Tool,
+} from '@google/genai'
 import type { Message, PageContent, GeminiConfig, BrowserAction } from '../types'
 import { buildSiteHintSection } from './siteHints'
 import type { GeminiUsage } from './cost'
@@ -13,6 +14,44 @@ import type { GeminiUsage } from './cost'
 // Re-export so existing `import { ... } from '../lib/gemini'` call sites can
 // pick up the usage type without reaching into cost.ts directly.
 export type { GeminiUsage } from './cost'
+
+// Current Gemini models use the built-in Google Search tool. Legacy
+// `google_search_retrieval` breaks on Gemini 3.x preview models.
+const searchGroundingTool: Tool = {
+  googleSearch: {},
+}
+
+function escapeMarkdownLinkLabel(label: string): string {
+  return label.replace(/\[/g, '\\[').replace(/\]/g, '\\]')
+}
+
+function appendGroundingSources(
+  text: string,
+  response?: GenerateContentResponse
+): string {
+  const grounding = response?.candidates?.[0]?.groundingMetadata
+  if (!grounding) return text
+
+  const seen = new Set<string>()
+  const sources = (grounding.groundingChunks ?? [])
+    .map((chunk) => chunk.web)
+    .filter((web): web is NonNullable<typeof web> => Boolean(web?.uri))
+    .filter((web) => {
+      if (seen.has(web.uri!)) return false
+      seen.add(web.uri!)
+      return true
+    })
+    .slice(0, 5)
+
+  if (sources.length === 0) return text
+
+  const lines = sources.map((source) => {
+    const label = escapeMarkdownLinkLabel(source.title?.trim() || source.uri!)
+    return `- [${label}](${source.uri})`
+  })
+
+  return `${text}\n\n**Sources**\n${lines.join('\n')}`
+}
 
 interface EmptyResponseMeta {
   finishReason?: string
@@ -46,10 +85,10 @@ const browserTools: FunctionDeclaration[] = [
     description:
       'When user says "click X" or wants to press a button/link, call this immediately with an appropriate CSS selector. Uses native CDP mouse events (isTrusted: true) so React/Gmail/X.com accept the click.',
     parameters: {
-      type: SchemaType.OBJECT,
+      type: Type.OBJECT,
       properties: {
         selector: {
-          type: SchemaType.STRING,
+          type: Type.STRING,
           description:
             'CSS selector for the element to click (e.g., "button.submit", "#login-btn", "a[href=\'/about\']")',
         },
@@ -62,14 +101,14 @@ const browserTools: FunctionDeclaration[] = [
     description:
       'When user says "enter X in Y" / "fill Y with X" / "type X into Y", call this immediately. Focuses the element then dispatches per-character native keyDown/keyUp events via CDP (works with React, contenteditable, and Japanese input). To submit the form after filling, prefer: (a) click the submit button explicitly (e.g. `#nav-search-submit-button` on Amazon), or (b) press_key("Enter", selector="same as fill target"). Naked press_key("Enter") may silently no-op due to focus loss between tool calls.',
     parameters: {
-      type: SchemaType.OBJECT,
+      type: Type.OBJECT,
       properties: {
         selector: {
-          type: SchemaType.STRING,
+          type: Type.STRING,
           description: 'CSS selector of the input/textarea/contenteditable',
         },
         value: {
-          type: SchemaType.STRING,
+          type: Type.STRING,
           description: 'The text value to type',
         },
       },
@@ -81,10 +120,10 @@ const browserTools: FunctionDeclaration[] = [
     description:
       'When user asks about page structure or you need to discover the correct selector, call this immediately. Returns element outerHTML or the body HTML.',
     parameters: {
-      type: SchemaType.OBJECT,
+      type: Type.OBJECT,
       properties: {
         selector: {
-          type: SchemaType.STRING,
+          type: Type.STRING,
           description: 'Optional CSS selector. If omitted, returns the entire body HTML.',
         },
       },
@@ -95,10 +134,10 @@ const browserTools: FunctionDeclaration[] = [
     description:
       'When user asks to "hover over X", or when a click does not work because the element only appears on hover (dropdowns, tooltips), call this to dispatch a native mouseMoved event.',
     parameters: {
-      type: SchemaType.OBJECT,
+      type: Type.OBJECT,
       properties: {
         selector: {
-          type: SchemaType.STRING,
+          type: Type.STRING,
           description: 'CSS selector of the element to hover',
         },
       },
@@ -110,18 +149,18 @@ const browserTools: FunctionDeclaration[] = [
     description:
       'When user says "scroll to X" or before interacting with an element that may be off-screen, call this to scroll the element into view.',
     parameters: {
-      type: SchemaType.OBJECT,
+      type: Type.OBJECT,
       properties: {
         selector: {
-          type: SchemaType.STRING,
+          type: Type.STRING,
           description: 'CSS selector of the element to scroll into view',
         },
         block: {
-          type: SchemaType.STRING,
+          type: Type.STRING,
           description: 'Vertical alignment: "start" | "center" | "end" | "nearest" (default: "nearest")',
         },
         behavior: {
-          type: SchemaType.STRING,
+          type: Type.STRING,
           description: '"auto" (default) or "smooth"',
         },
       },
@@ -133,10 +172,10 @@ const browserTools: FunctionDeclaration[] = [
     description:
       'When user wants to move focus without clicking (keyboard navigation, form ordering), call this. Always consider calling focus_element before fill_element when the target is a form field.',
     parameters: {
-      type: SchemaType.OBJECT,
+      type: Type.OBJECT,
       properties: {
         selector: {
-          type: SchemaType.STRING,
+          type: Type.STRING,
           description: 'CSS selector of the focusable element',
         },
       },
@@ -148,10 +187,10 @@ const browserTools: FunctionDeclaration[] = [
     description:
       'When user asks to "deselect", "remove focus", or to trigger blur-based validation, call this. If no selector is given, blurs the current activeElement.',
     parameters: {
-      type: SchemaType.OBJECT,
+      type: Type.OBJECT,
       properties: {
         selector: {
-          type: SchemaType.STRING,
+          type: Type.STRING,
           description: 'Optional CSS selector. If omitted, blurs document.activeElement.',
         },
       },
@@ -162,10 +201,10 @@ const browserTools: FunctionDeclaration[] = [
     description:
       'When user asks to "right-click X" or open a context menu, call this to dispatch a native mousedown/up with right button.',
     parameters: {
-      type: SchemaType.OBJECT,
+      type: Type.OBJECT,
       properties: {
         selector: {
-          type: SchemaType.STRING,
+          type: Type.STRING,
           description: 'CSS selector of the element to right-click',
         },
       },
@@ -177,10 +216,10 @@ const browserTools: FunctionDeclaration[] = [
     description:
       'When user asks to "double-click X" or needs to trigger a dblclick handler, call this.',
     parameters: {
-      type: SchemaType.OBJECT,
+      type: Type.OBJECT,
       properties: {
         selector: {
-          type: SchemaType.STRING,
+          type: Type.STRING,
           description: 'CSS selector of the element to double-click',
         },
       },
@@ -192,18 +231,18 @@ const browserTools: FunctionDeclaration[] = [
     description:
       'When user asks to "select all text in X" or to highlight a range, call this. Useful before fill_element on a field that already has content so the typed text replaces the old value.',
     parameters: {
-      type: SchemaType.OBJECT,
+      type: Type.OBJECT,
       properties: {
         selector: {
-          type: SchemaType.STRING,
+          type: Type.STRING,
           description: 'CSS selector of the element whose text should be selected',
         },
         start: {
-          type: SchemaType.NUMBER,
+          type: Type.NUMBER,
           description: 'Optional selection start index (use with end)',
         },
         end: {
-          type: SchemaType.NUMBER,
+          type: Type.NUMBER,
           description: 'Optional selection end index (use with start)',
         },
       },
@@ -215,14 +254,14 @@ const browserTools: FunctionDeclaration[] = [
     description:
       'When user asks to "press Enter" / "hit Escape" / "Tab to the next field" or you need to submit a form after filling, call this. Supported keys: Enter, Tab, Escape, Backspace, Delete, ArrowUp/Down/Left/Right, Home, End, PageUp, PageDown, Space, F1-F12, and single letters/digits.',
     parameters: {
-      type: SchemaType.OBJECT,
+      type: Type.OBJECT,
       properties: {
         key: {
-          type: SchemaType.STRING,
+          type: Type.STRING,
           description: 'The key to press, e.g. "Enter", "Escape", "ArrowDown", "a"',
         },
         selector: {
-          type: SchemaType.STRING,
+          type: Type.STRING,
           description:
             'Optional CSS selector to re-focus before the key event. **Essential after fill_element** — the debugger detach between tools drops focus, and Enter on <body> will not submit the form. Pass the same selector you filled.',
         },
@@ -235,13 +274,13 @@ const browserTools: FunctionDeclaration[] = [
     description:
       'When user asks for a shortcut like Ctrl+S, Cmd+A, Ctrl+Shift+P, call this with the ordered list of keys. Modifiers are held down while the main key is pressed, then released in reverse. Use "Control", "Meta", "Alt", "Shift" for modifiers.',
     parameters: {
-      type: SchemaType.OBJECT,
+      type: Type.OBJECT,
       properties: {
         keys: {
-          type: SchemaType.ARRAY,
+          type: Type.ARRAY,
           description:
             'Ordered list, e.g. ["Control", "s"] or ["Meta", "Shift", "p"]. Exactly one non-modifier key.',
-          items: { type: SchemaType.STRING },
+          items: { type: Type.STRING },
         },
       },
       required: ['keys'],
@@ -252,14 +291,14 @@ const browserTools: FunctionDeclaration[] = [
     description:
       'When user expects an element to appear soon (after a click/navigation) or wants to pause until the UI is ready, call this immediately. Polls every 200ms for a visible match and returns the elapsed milliseconds, or fails on timeout.',
     parameters: {
-      type: SchemaType.OBJECT,
+      type: Type.OBJECT,
       properties: {
         selector: {
-          type: SchemaType.STRING,
+          type: Type.STRING,
           description: 'CSS selector of the element to wait for',
         },
         timeout_ms: {
-          type: SchemaType.NUMBER,
+          type: Type.NUMBER,
           description: 'Timeout in milliseconds (default 5000, max 60000)',
         },
       },
@@ -271,14 +310,14 @@ const browserTools: FunctionDeclaration[] = [
     description:
       'When user asks to "scroll down 500px" / "scroll up a bit" / wants relative scrolling, call this immediately. Emits a real mouseWheel event via CDP and returns the resulting scroll position. **Also the right tool for progressive top-to-bottom exploration** — use dy≈900 (one desktop viewport) per step and read the page between steps.',
     parameters: {
-      type: SchemaType.OBJECT,
+      type: Type.OBJECT,
       properties: {
         dx: {
-          type: SchemaType.NUMBER,
+          type: Type.NUMBER,
           description: 'Horizontal pixel delta (positive = right)',
         },
         dy: {
-          type: SchemaType.NUMBER,
+          type: Type.NUMBER,
           description: 'Vertical pixel delta (positive = down)',
         },
       },
@@ -290,10 +329,10 @@ const browserTools: FunctionDeclaration[] = [
     description:
       'ONLY when user explicitly says "scroll to bottom" / "load all comments" / "go to the end", OR when you need to force-load every item in an infinite-scroll timeline. **Do NOT call this as a shortcut for "see the whole page"** — it skips all the content above the fold. For general exploration use scroll_by in viewport-sized steps instead.',
     parameters: {
-      type: SchemaType.OBJECT,
+      type: Type.OBJECT,
       properties: {
         behavior: {
-          type: SchemaType.STRING,
+          type: Type.STRING,
           description: '"auto" (default) or "smooth"',
         },
       },
@@ -304,10 +343,10 @@ const browserTools: FunctionDeclaration[] = [
     description:
       'When user says "scroll to top" / "back to top", call this immediately. Jumps the viewport to (0,0).',
     parameters: {
-      type: SchemaType.OBJECT,
+      type: Type.OBJECT,
       properties: {
         behavior: {
-          type: SchemaType.STRING,
+          type: Type.STRING,
           description: '"auto" (default) or "smooth"',
         },
       },
@@ -318,7 +357,7 @@ const browserTools: FunctionDeclaration[] = [
     description:
       'When user asks about current scroll position or you need to decide how far to scroll, call this. Returns {x, y, maxX, maxY} for the viewport.',
     parameters: {
-      type: SchemaType.OBJECT,
+      type: Type.OBJECT,
       properties: {},
     },
   },
@@ -327,7 +366,7 @@ const browserTools: FunctionDeclaration[] = [
     description:
       'When user asks to "summarize this page" / "extract the article" / wants the main text of the current page, call this. Returns Readability-cleaned Markdown plus title / url / excerpt (content capped at 30000 chars).',
     parameters: {
-      type: SchemaType.OBJECT,
+      type: Type.OBJECT,
       properties: {},
     },
   },
@@ -336,10 +375,10 @@ const browserTools: FunctionDeclaration[] = [
     description:
       'When user asks "what does X say?" / "read the headline", call this to grab the trimmed textContent of the first visible match (truncated to 5000 chars).',
     parameters: {
-      type: SchemaType.OBJECT,
+      type: Type.OBJECT,
       properties: {
         selector: {
-          type: SchemaType.STRING,
+          type: Type.STRING,
           description: 'CSS selector of the element whose text you want',
         },
       },
@@ -351,14 +390,14 @@ const browserTools: FunctionDeclaration[] = [
     description:
       'When user asks for an attribute of an element ("get the href", "what is the aria-label?"), call this. Returns the attribute string (or null) from the first visible match.',
     parameters: {
-      type: SchemaType.OBJECT,
+      type: Type.OBJECT,
       properties: {
         selector: {
-          type: SchemaType.STRING,
+          type: Type.STRING,
           description: 'CSS selector of the element',
         },
         name: {
-          type: SchemaType.STRING,
+          type: Type.STRING,
           description: 'Attribute name (e.g. "href", "src", "data-id", "aria-label")',
         },
       },
@@ -370,14 +409,14 @@ const browserTools: FunctionDeclaration[] = [
     description:
       'When user asks to enumerate items ("list all article titles", "find every button"), call this. Returns up to N matches with index, text preview, visibility, tagName, rect, and optional href / aria-label.',
     parameters: {
-      type: SchemaType.OBJECT,
+      type: Type.OBJECT,
       properties: {
         selector: {
-          type: SchemaType.STRING,
+          type: Type.STRING,
           description: 'CSS selector to query',
         },
         limit: {
-          type: SchemaType.NUMBER,
+          type: Type.NUMBER,
           description: 'Max elements to return (default 20, max 200)',
         },
       },
@@ -389,10 +428,10 @@ const browserTools: FunctionDeclaration[] = [
     description:
       'When user asks for available links ("what can I click?", "list links in the sidebar"), call this. Returns visible <a> elements (or elements matching filter_selector) with text / href / title / aria-label. Capped at 50.',
     parameters: {
-      type: SchemaType.OBJECT,
+      type: Type.OBJECT,
       properties: {
         filter_selector: {
-          type: SchemaType.STRING,
+          type: Type.STRING,
           description: 'Optional CSS selector (default "a"). Use e.g. "nav a" or "article a".',
         },
       },
@@ -403,10 +442,10 @@ const browserTools: FunctionDeclaration[] = [
     description:
       'When you need a short pause for an animation / transition to finish, call this with milliseconds (capped at 10000). Prefer wait_for_element when waiting for specific UI.',
     parameters: {
-      type: SchemaType.OBJECT,
+      type: Type.OBJECT,
       properties: {
         ms: {
-          type: SchemaType.NUMBER,
+          type: Type.NUMBER,
           description: 'Milliseconds to wait (max 10000)',
         },
       },
@@ -418,20 +457,20 @@ const browserTools: FunctionDeclaration[] = [
     description:
       'When user asks to "go to URL X" / "open this link" / "see what /about looks like", call this. Navigates the active tab to a same-origin URL by default and returns the new page (Readability Markdown). Use this when you need to actually load a different route to inspect it.',
     parameters: {
-      type: SchemaType.OBJECT,
+      type: Type.OBJECT,
       properties: {
         url: {
-          type: SchemaType.STRING,
+          type: Type.STRING,
           description:
             'URL to navigate to. Relative paths are resolved against the current page. Default: same-origin only (use same_origin_only=false to override).',
         },
         same_origin_only: {
-          type: SchemaType.BOOLEAN,
+          type: Type.BOOLEAN,
           description:
             'If true (default), refuse cross-origin navigation. Set false only when user explicitly asks to leave the site.',
         },
         wait_for_load: {
-          type: SchemaType.BOOLEAN,
+          type: Type.BOOLEAN,
           description: 'Wait until the new page completes loading before returning (default true).',
         },
       },
@@ -443,23 +482,23 @@ const browserTools: FunctionDeclaration[] = [
     description:
       'When you need raw response data from a URL (JSON API, plain text, partial HTML) WITHOUT navigating the browser, call this. Best for inspecting JSON endpoints (e.g. /api/users, /kv/hello returning JSON). Issues an HTTP request from the extension background.',
     parameters: {
-      type: SchemaType.OBJECT,
+      type: Type.OBJECT,
       properties: {
         url: {
-          type: SchemaType.STRING,
+          type: Type.STRING,
           description: 'Absolute or current-page-relative URL.',
         },
         method: {
-          type: SchemaType.STRING,
+          type: Type.STRING,
           description: 'GET (default) / POST / PUT / DELETE / PATCH / HEAD',
         },
         headers: {
-          type: SchemaType.OBJECT,
+          type: Type.OBJECT,
           description: 'Optional headers as key-value pairs.',
           properties: {},
         },
         body: {
-          type: SchemaType.STRING,
+          type: Type.STRING,
           description: 'Optional request body (string; for JSON pre-stringify).',
         },
       },
@@ -471,15 +510,15 @@ const browserTools: FunctionDeclaration[] = [
     description:
       'Run arbitrary JavaScript in the active tab. The code is wrapped in an async IIFE so you can `await` and `return` any JSON-serializable value. Use this when the fixed tools (find_elements / get_text / get_attribute etc.) are too rigid — e.g. extracting structured data from listings (title+price+url from product cards in one shot), custom DOM traversal, computing aggregates, or reading multiple fields per item. The return value is sent back as structured JSON (capped at 100KB; larger outputs are truncated). Prefer this over 5+ sequential get_text calls when you need multi-field extraction from a list.',
     parameters: {
-      type: SchemaType.OBJECT,
+      type: Type.OBJECT,
       properties: {
         code: {
-          type: SchemaType.STRING,
+          type: Type.STRING,
           description:
             'JavaScript code. Use `return` to output JSON-serializable data. Can be async (await supported). Example: `const cards = document.querySelectorAll("[data-component-type=\\"s-search-result\\"]"); return Array.from(cards).slice(0, 20).map(c => ({ title: c.querySelector("h2")?.textContent?.trim(), price: c.querySelector(".a-price .a-offscreen")?.textContent?.trim(), url: c.querySelector("h2 a")?.href }));`',
         },
         timeout_ms: {
-          type: SchemaType.NUMBER,
+          type: Type.NUMBER,
           description: 'Max execution time in milliseconds (default 10000, max 30000).',
         },
       },
@@ -892,20 +931,31 @@ export interface ChatResponse {
  * Gemini API wrapper for chat functionality
  */
 export class GeminiChat {
-  private model: GenerativeModel
   private _modelName: string
-  private genAI: GoogleGenerativeAI
+  private ai: GoogleGenAI
 
   constructor(config: GeminiConfig) {
     this._modelName = config.modelName
-    this.genAI = new GoogleGenerativeAI(config.apiKey)
-    this.model = this.genAI.getGenerativeModel({
-      model: config.modelName,
-    })
+    this.ai = new GoogleGenAI({ apiKey: config.apiKey })
   }
 
   get modelName(): string {
     return this._modelName
+  }
+
+  private createChat(
+    history: Array<{ role: 'user' | 'model'; parts: Array<{ text: string }> }>,
+    systemPrompt: string,
+    config: Record<string, unknown> = {}
+  ) {
+    return this.ai.chats.create({
+      model: this._modelName,
+      history,
+      config: {
+        systemInstruction: systemPrompt,
+        ...config,
+      },
+    })
   }
 
   /**
@@ -928,6 +978,13 @@ Your job is to understand the user's intent and deliver a complete answer ground
 ## Tool Mode
 
 You have browser automation tools in this request. Use them when needed, and do not stop after a shallow first glance.
+
+## Scope Discipline
+
+- Treat the current page as **helpful context, not a cage**.
+- If the user asks a broad question that is not actually about the open page, answer the question directly instead of refusing because the page does not mention it.
+- If the user asks for a **time-sensitive or current fact** ("今", "現在", "latest", "today", "recent", office holders, news, prices, schedules, etc.), prefer Google Search grounding before answering.
+- Only say "the current page does not mention X" when the user explicitly asked what the page says about X.
 
 ## Task Classification (decide this first)
 
@@ -986,10 +1043,12 @@ When a selector misses or an action has no visible effect:
 
 ## No-Tool Mode
 
-- You do NOT have any browser automation or function-calling tools in this request.
-- Answer directly from the provided page context and chat history only.
+- You do NOT have browser automation or page interaction tools in this request.
+- The provided page context is supplemental. You may also use your own general knowledge.
+- If the user asks for a **time-sensitive / current** fact ("今", "現在", "latest", "today", "recent", office holders, news, prices, schedules, etc.), use Google Search grounding if available before answering.
+- Do NOT refuse just because the current page lacks the answer unless the user explicitly asked about the page itself.
 - Do not mention tool names, selectors, browser actions, or function calls.
-- If the provided context is insufficient, say what is missing briefly instead of inventing details or attempting a tool call.
+- If the provided context and grounded search are still insufficient, say what is missing briefly instead of inventing details.
 `
     }
 
@@ -1194,16 +1253,11 @@ ${pageContent.content.slice(0, 30000)}`
     const systemPrompt = this.buildSystemPrompt(pageContent)
     const chatHistory = this.buildChatHistory(history)
 
-    const chat = this.model.startChat({
-      history: chatHistory,
-      systemInstruction: {
-        role: 'user',
-        parts: [{ text: systemPrompt }],
-      },
+    const chat = this.createChat(chatHistory, systemPrompt, {
+      tools: [searchGroundingTool],
     })
 
-    const result = await chat.sendMessage(userMessage)
-    const response = result.response
+    const response = await chat.sendMessage({ message: userMessage })
     if (onUsage && response?.usageMetadata) {
       const u = response.usageMetadata
       onUsage({
@@ -1212,7 +1266,7 @@ ${pageContent.content.slice(0, 30000)}`
         totalTokenCount: u.totalTokenCount ?? 0,
       })
     }
-    return response.text()
+    return appendGroundingSources(response.text ?? '', response)
   }
 
   /**
@@ -1236,20 +1290,18 @@ ${pageContent.content.slice(0, 30000)}`
       const systemPrompt = this.buildSystemPrompt(pageContent)
       const chatHistory = this.buildChatHistory(history)
 
-      const chat = this.model.startChat({
-        history: chatHistory,
-        systemInstruction: {
-          role: 'user',
-          parts: [{ text: systemPrompt }],
-        },
+      const chat = this.createChat(chatHistory, systemPrompt, {
+        tools: [searchGroundingTool],
       })
 
-      const result = await chat.sendMessageStream(userMessage)
+      const result = await chat.sendMessageStream({ message: userMessage })
       let fullText = ''
+      let aggregatedResponse: GenerateContentResponse | undefined
 
-      for await (const chunk of result.stream) {
+      for await (const chunk of result) {
         throwIfAborted(signal)
-        const chunkText = chunk.text()
+        aggregatedResponse = chunk
+        const chunkText = chunk.text ?? ''
         fullText += chunkText
         onChunk(chunkText)
       }
@@ -1262,7 +1314,7 @@ ${pageContent.content.slice(0, 30000)}`
         let finishMessage: string | undefined
         let blockReason: string | undefined
         try {
-          const agg = await result.response
+          const agg = aggregatedResponse
           finishReason = agg?.candidates?.[0]?.finishReason
           finishMessage = agg?.candidates?.[0]?.finishMessage
           blockReason = agg?.promptFeedback?.blockReason
@@ -1290,7 +1342,13 @@ ${pageContent.content.slice(0, 30000)}`
 
       // Stream drained successfully — now surface usage metadata before
       // signalling completion so the UI can update cost indicators.
-      await reportUsage(result.response, onUsage)
+      await reportUsage(Promise.resolve(aggregatedResponse), onUsage)
+
+      const finalText = appendGroundingSources(fullText, aggregatedResponse)
+      if (finalText !== fullText) {
+        onChunk(finalText.slice(fullText.length))
+        fullText = finalText
+      }
 
       onComplete(fullText)
     } catch (error) {
@@ -1324,47 +1382,37 @@ ${pageContent.content.slice(0, 30000)}`
       const systemPrompt = this.buildSystemPrompt(pageContent, true)
       const chatHistory = this.buildChatHistory(history)
 
-      // ANY forces the very first turn to call at least one tool, killing the
-      // "answer with hallucinated content" failure mode where Gemini skips
-      // tools and invents response bodies for endpoints it never fetched.
-      const modelWithTools = this.genAI.getGenerativeModel({
-        model: this._modelName,
-        tools: [{ functionDeclarations: browserTools }],
+      const chat = this.createChat(chatHistory, systemPrompt, {
+        tools: [{ functionDeclarations: browserTools }, searchGroundingTool],
         toolConfig: {
           functionCallingConfig: {
-            mode: forceCall ? FunctionCallingMode.ANY : FunctionCallingMode.AUTO,
+            mode: forceCall ? FunctionCallingConfigMode.ANY : FunctionCallingConfigMode.AUTO,
           },
         },
       })
 
-      const chat = modelWithTools.startChat({
-        history: chatHistory,
-        systemInstruction: {
-          role: 'user',
-          parts: [{ text: systemPrompt }],
-        },
-      })
-
-      const result = await chat.sendMessageStream(userMessage)
+      const result = await chat.sendMessageStream({ message: userMessage })
       let fullText = ''
       let functionCalls: FunctionCall[] = []
+      let aggregatedResponse: GenerateContentResponse | undefined
 
-      for await (const chunk of result.stream) {
+      for await (const chunk of result) {
         throwIfAborted(signal)
-        const chunkText = chunk.text()
+        aggregatedResponse = chunk
+        const chunkText = chunk.text ?? ''
         if (chunkText) {
           fullText += chunkText
           onChunk(chunkText)
         }
 
         // Check for function calls in the chunk
-        const chunkFunctionCalls = chunk.functionCalls()
+        const chunkFunctionCalls = chunk.functionCalls
         if (chunkFunctionCalls && chunkFunctionCalls.length > 0) {
           functionCalls = chunkFunctionCalls
         }
       }
 
-      const response = await result.response
+      const response = aggregatedResponse
 
       // Usage is always reported — whether the model emitted text or function
       // calls the API still bills for the prompt + candidates tokens.
@@ -1406,7 +1454,11 @@ ${pageContent.content.slice(0, 30000)}`
         )
       } else {
         console.log('Gemini returned text only (no function calls)')
-        onComplete(fullText)
+        const finalText = appendGroundingSources(fullText, response)
+        if (finalText !== fullText) {
+          onChunk(finalText.slice(fullText.length))
+        }
+        onComplete(finalText)
       }
     } catch (error) {
       if (error instanceof DOMException && error.name === 'AbortError') {
@@ -1439,21 +1491,12 @@ ${pageContent.content.slice(0, 30000)}`
       const systemPrompt = this.buildSystemPrompt(pageContent, true)
       const chatHistory = this.buildChatHistory(history)
 
-      const modelWithTools = this.genAI.getGenerativeModel({
-        model: this._modelName,
-        tools: [{ functionDeclarations: browserTools }],
+      const chat = this.createChat(chatHistory, systemPrompt, {
+        tools: [{ functionDeclarations: browserTools }, searchGroundingTool],
         toolConfig: {
           functionCallingConfig: {
-            mode: FunctionCallingMode.AUTO, // Let model decide, but with aggressive prompting
+            mode: FunctionCallingConfigMode.AUTO,
           },
-        },
-      })
-
-      const chat = modelWithTools.startChat({
-        history: chatHistory,
-        systemInstruction: {
-          role: 'user',
-          parts: [{ text: systemPrompt }],
         },
       })
 
@@ -1475,20 +1518,22 @@ Based on these results, decide:
 - If more tool calls are needed (e.g. titles came back empty — use get_html to inspect the real DOM; a listing page wasn't loaded yet — wait or navigate; an extraction only returned partial data — try a different selector or run_js variant), CALL the next appropriate tool now. Do not describe what you WOULD do — do it.
 - Avoid repeating the exact same tool call with the exact same arguments; if a call was unhelpful, change strategy (different selector, different tool, get_html to inspect).`
 
-      const result = await chat.sendMessageStream(continuationMessage)
+      const result = await chat.sendMessageStream({ message: continuationMessage })
 
       let fullText = ''
       let newFunctionCalls: FunctionCall[] = []
+      let aggregatedResponse: GenerateContentResponse | undefined
 
-      for await (const chunk of result.stream) {
+      for await (const chunk of result) {
         throwIfAborted(signal)
-        const chunkText = chunk.text()
+        aggregatedResponse = chunk
+        const chunkText = chunk.text ?? ''
         if (chunkText) {
           fullText += chunkText
           onChunk(chunkText)
         }
 
-        const chunkFunctionCalls = chunk.functionCalls()
+        const chunkFunctionCalls = chunk.functionCalls
         if (chunkFunctionCalls && chunkFunctionCalls.length > 0) {
           newFunctionCalls = chunkFunctionCalls
         }
@@ -1496,12 +1541,16 @@ Based on these results, decide:
 
       // Tool-continuation turns are billed independently; report usage for
       // each one so the per-turn total in the UI reflects every round trip.
-      await reportUsage(result.response, onUsage)
+      await reportUsage(Promise.resolve(aggregatedResponse), onUsage)
 
       if (newFunctionCalls.length > 0) {
         onFunctionCall(newFunctionCalls)
       } else {
-        onComplete(fullText)
+        const finalText = appendGroundingSources(fullText, aggregatedResponse)
+        if (finalText !== fullText) {
+          onChunk(finalText.slice(fullText.length))
+        }
+        onComplete(finalText)
       }
     } catch (error) {
       if (error instanceof DOMException && error.name === 'AbortError') {

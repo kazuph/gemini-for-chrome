@@ -3,7 +3,7 @@ import { defineManifest } from '@crxjs/vite-plugin'
 export default defineManifest({
   manifest_version: 3,
   name: 'Gemini Side Panel Client',
-  version: '2.0.16',
+  version: '2.1.0',
   description: 'A side panel Chrome extension powered by Gemini (2.0 / 2.5 / 3.x). CDP-powered native input for bot-resistant sites.',
   permissions: ['sidePanel', 'storage', 'activeTab', 'scripting', 'debugger'],
   host_permissions: ['<all_urls>'],
