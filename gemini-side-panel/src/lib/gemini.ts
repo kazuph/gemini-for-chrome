@@ -14,6 +14,31 @@ import type { GeminiUsage } from './cost'
 // pick up the usage type without reaching into cost.ts directly.
 export type { GeminiUsage } from './cost'
 
+interface EmptyResponseMeta {
+  finishReason?: string
+  finishMessage?: string
+  blockReason?: string
+  hadTools?: boolean
+}
+
+function buildEmptyResponseError(meta: EmptyResponseMeta): Error {
+  const reason = meta.finishReason || meta.blockReason || 'unknown'
+  const detail = meta.finishMessage ? ` Detail: ${meta.finishMessage}` : ''
+
+  if (reason === 'UNEXPECTED_TOOL_CALL') {
+    const hint = meta.hadTools
+      ? 'The model attempted an invalid browser-action tool call.'
+      : 'The model attempted a tool call even though tool mode was not active.'
+    return new Error(
+      `Gemini returned an empty response (finishReason=${reason}). ${hint} This is usually recoverable by retrying without forced tool calling or rephrasing the request.${detail}`
+    )
+  }
+
+  return new Error(
+    `Gemini returned an empty response (finishReason=${reason}). This often means the page content was too large, triggered safety filters, or the model exhausted its thinking budget. Check the Service Worker console for details, try a smaller page, or switch to a different model.${detail}`
+  )
+}
+
 // Tool definitions for browser actions
 const browserTools: FunctionDeclaration[] = [
   {
@@ -888,15 +913,21 @@ export class GeminiChat {
    */
   private buildSystemPrompt(pageContent?: PageContent, enableTools = false): string {
     let systemPrompt = `You are an autonomous browser agent embedded in a Chrome side panel, powered by Gemini.
-Your job is to understand the user's intent, explore the current page actively with your tools, and deliver a complete answer — not to stop after a single glance.
+Your job is to understand the user's intent and deliver a complete answer grounded in the current chat and page context.
 
 ## Operating Principles
 
-1. **Act, don't ask.** Unless a request is genuinely ambiguous, take action first. Don't interrupt with clarifying questions when a reasonable default exists — try, observe, adapt.
-2. **Explore before summarizing.** A single tool call is rarely enough for questions about "what is this site" / "tell me about this page" / "give me an overview". Investigate multiple areas before concluding.
-3. **Self-check before concluding.** Before you write a final answer, ask yourself: *Did I actually gather enough evidence? Is there a section I haven't read? Did a tool return nothing useful — should I try a different selector or scroll further?* If any answer is "no" or "I'm not sure", call more tools.
-4. **Honesty over confidence.** Never claim an action succeeded if you did not observe success. Never fabricate page content you did not actually read with a tool.
-5. **Match the user's language.** Respond in the same language as the user's message. Format answers in Markdown when helpful.
+1. **Act, don't ask.** Unless a request is genuinely ambiguous, answer or act with a reasonable default first.
+2. **Self-check before concluding.** Before you finish, ask yourself: *Do I have enough evidence from the provided context to answer confidently?*
+3. **Honesty over confidence.** Never claim you saw content that was not actually present in the provided context.
+4. **Match the user's language.** Respond in the same language as the user's message. Format answers in Markdown when helpful.`
+
+    if (enableTools) {
+      systemPrompt += `
+
+## Tool Mode
+
+You have browser automation tools in this request. Use them when needed, and do not stop after a shallow first glance.
 
 ## Task Classification (decide this first)
 
@@ -949,12 +980,26 @@ When a selector misses or an action has no visible effect:
 2. Watch for **multiple matches of the same selector** — a hidden duplicate often comes before the visible one. Prefer attributes like \`data-testid\`, \`aria-label\`, text content, or position-within-list to disambiguate.
 3. Retry with the corrected selector.
 4. If still failing, surface the attempted selectors + actual DOM snippet to the user rather than silently giving up.
+`
+    } else {
+      systemPrompt += `
+
+## No-Tool Mode
+
+- You do NOT have any browser automation or function-calling tools in this request.
+- Answer directly from the provided page context and chat history only.
+- Do not mention tool names, selectors, browser actions, or function calls.
+- If the provided context is insufficient, say what is missing briefly instead of inventing details or attempting a tool call.
+`
+    }
+
+    systemPrompt += `
 
 ## Response Style
 
-- While working: keep tool reasoning brief and move on to the next action.
-- When reporting: Markdown, structured, cite which tool results support each claim when the user asked for analysis. Prefer lists and short paragraphs.
-- Do not repeat the whole tool output back — summarize.
+- While working: keep reasoning brief and move on to the next action.
+- When reporting: Markdown, structured, and concise. When the user asked for analysis, cite the supporting evidence from the available context.
+- Do not repeat the raw context back verbatim — summarize.
 - **Structured / comparative data MUST be formatted as a GitHub-flavored Markdown table**, not as plain bullet lines with spaces. Whenever you present multiple items with the same set of fields (products, links, rows, search results, spec comparisons, etc.), render them as a \`| header | header |\` / \`|---|---|\` / \`| value | value |\` table. Do this on the first reply — do not wait for the user to ask for a table.
   - Example (first reply, not on request):
     \`\`\`markdown
@@ -1214,10 +1259,12 @@ ${pageContent.content.slice(0, 30000)}`
       // saving a silent empty assistant message.
       if (!fullText.trim()) {
         let finishReason: string | undefined
+        let finishMessage: string | undefined
         let blockReason: string | undefined
         try {
           const agg = await result.response
           finishReason = agg?.candidates?.[0]?.finishReason
+          finishMessage = agg?.candidates?.[0]?.finishMessage
           blockReason = agg?.promptFeedback?.blockReason
           // Even on empty-text responses, usage is typically reported — still
           // surface it so the user sees the spend for this (failed) call.
@@ -1237,12 +1284,7 @@ ${pageContent.content.slice(0, 30000)}`
         } catch (e) {
           console.warn('Failed to inspect empty response', e)
         }
-        const reason = finishReason || blockReason || 'unknown'
-        onError(
-          new Error(
-            `Gemini returned an empty response (finishReason=${reason}). This often means the page content was too large, triggered safety filters, or the model exhausted its thinking budget. Check the Service Worker console for details, try a smaller page, or switch to a different model.`
-          )
-        )
+        onError(buildEmptyResponseError({ finishReason, finishMessage, blockReason }))
         return
       }
 
@@ -1322,14 +1364,46 @@ ${pageContent.content.slice(0, 30000)}`
         }
       }
 
+      const response = await result.response
+
       // Usage is always reported — whether the model emitted text or function
       // calls the API still bills for the prompt + candidates tokens.
-      await reportUsage(result.response, onUsage)
+      await reportUsage(Promise.resolve(response), onUsage)
 
       // If there are function calls, return them for execution
       if (functionCalls.length > 0) {
         console.log('Gemini returned function calls:', JSON.stringify(functionCalls, null, 2))
         onFunctionCall(functionCalls)
+      } else if (!fullText.trim()) {
+        const finishReason = response?.candidates?.[0]?.finishReason
+        const finishMessage = response?.candidates?.[0]?.finishMessage
+
+        if (forceCall && String(finishReason) === 'UNEXPECTED_TOOL_CALL') {
+          console.warn(
+            'Gemini returned UNEXPECTED_TOOL_CALL with forced function calling; retrying once with AUTO mode'
+          )
+          await this.sendMessageWithTools(
+            userMessage,
+            history,
+            pageContent,
+            onChunk,
+            onComplete,
+            onFunctionCall,
+            onError,
+            signal,
+            false,
+            onUsage
+          )
+          return
+        }
+
+        onError(
+          buildEmptyResponseError({
+            finishReason,
+            finishMessage,
+            hadTools: true,
+          })
+        )
       } else {
         console.log('Gemini returned text only (no function calls)')
         onComplete(fullText)
