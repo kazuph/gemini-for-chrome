@@ -1,6 +1,6 @@
 import { useMemo, Fragment } from 'react'
 import DOMPurify from 'dompurify'
-import { marked } from 'marked'
+import { marked, Renderer } from 'marked'
 import { cn } from '../lib/utils'
 import MermaidDiagram from './MermaidDiagram'
 
@@ -11,10 +11,20 @@ interface MarkdownRendererProps {
   fontSize?: number
 }
 
+// Custom link renderer to open links in new tab (side panel context)
+const renderer = new Renderer()
+const originalLink = renderer.link.bind(renderer)
+renderer.link = function (token) {
+  const linkHtml = originalLink(token)
+  // Inject target="_blank" and rel="noopener noreferrer" for security
+  return linkHtml.replace('<a ', '<a target="_blank" rel="noopener noreferrer" ')
+}
+
 // Configure marked options
 marked.setOptions({
   breaks: true, // Convert \n to <br>
   gfm: true, // GitHub Flavored Markdown
+  renderer,
 })
 
 // Regex to match mermaid code blocks
